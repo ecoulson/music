@@ -1,0 +1,18 @@
+[package]
+name = "web_player_frontend"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+askama = "0.12.1"
+axum = "0.7.5"
+axum-htmx = "0.5.0"
+prost = "0.12.4"
+tonic = "0.11.0"
+tokio = { version = "1.37", features = ["rt-multi-thread", "macros", "sync", "time"] }
+askama_axum = "0.4.0"
+
+[build-dependencies]
+tonic-build = { version = "0.11.0", features = ["prost"] }

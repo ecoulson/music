@@ -1,0 +1,13 @@
+syntax = "proto3";
+package hub;
+
+message StreamAudioRequest  {
+}
+
+message StreamAudioResponse {
+    bytes chunk = 1;
+}
+
+service Hub {
+    rpc StreamAudio(StreamAudioRequest) returns (stream StreamAudioResponse);
+}

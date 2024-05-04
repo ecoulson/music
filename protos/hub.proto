@@ -5,7 +5,8 @@ message StreamAudioRequest  {
 }
 
 message StreamAudioResponse {
-    bytes chunk = 1;
+    uint64 chunk_id = 1;
+    bytes chunk = 2;
 }
 
 service Hub {

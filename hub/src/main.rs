@@ -6,6 +6,7 @@ use hub::{
 };
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{transport::Server, Request, Response, Status};
+use tower_http::cors::CorsLayer;
 
 const ONE_MB: usize = 1048576;
 
@@ -59,12 +60,14 @@ impl Hub for HubService {
 
         tokio::spawn(async move {
             let reader = ChunkedReader::new(file);
+            let mut chunk_id = 0;
 
             for chunk in reader {
                 sender
-                    .send(Ok(StreamAudioResponse { chunk }))
+                    .send(Ok(StreamAudioResponse { chunk_id, chunk }))
                     .await
                     .expect("Should stream chunk in order");
+                chunk_id += 1;
             }
         });
 
@@ -74,11 +77,16 @@ impl Hub for HubService {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let address = "[::1]:8000".parse()?;
+    let address = "0.0.0.0:8000".parse()?;
     let hub_service = HubService::default();
     let hub = HubServer::new(hub_service);
 
-    Server::builder().add_service(hub).serve(address).await?;
+    Server::builder()
+        .accept_http1(true)
+        .layer(CorsLayer::permissive())
+        .add_service(tonic_web::enable(hub))
+        .serve(address)
+        .await?;
 
     Ok(())
 }

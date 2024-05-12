@@ -1,0 +1,10 @@
+<div id="player-component">
+  {{ state|safe }}
+  <div class="h-4 bg-gray-300 relative" id="playback-scrubber">
+    <div class="h-4 rounded-full w-4 bg-gray-500 absolute" id="playback-scrubber-control"></div>
+  </div>
+  <div class="h-4 w-64 bg-gray-300 relative" id="volume-control">
+    <div class="h-4 rounded-full w-4 bg-gray-500 absolute" id="volume-control-scrubber"></div>
+  </div>
+  <button id="playback-state">Play</button>
+</div>

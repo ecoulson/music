@@ -2,6 +2,7 @@ syntax = "proto3";
 package hub;
 
 message StreamAudioRequest  {
+    string track_id = 1;
 }
 
 message StreamAudioResponse {
@@ -9,6 +10,20 @@ message StreamAudioResponse {
     bytes chunk = 2;
 }
 
+message GetTrackListRequest {
+    repeated string track_ids = 1;
+}
+
+message GetTrackListResponse {
+    repeated Track tracks = 1;
+}
+
+message Track {
+    string track_id = 1;
+    string track_path = 2;
+}
+
 service Hub {
     rpc StreamAudio(StreamAudioRequest) returns (stream StreamAudioResponse);
+    rpc GetTrackList(GetTrackListRequest) returns (GetTrackListResponse);
 }

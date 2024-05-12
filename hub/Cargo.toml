@@ -13,6 +13,8 @@ tonic-web = { version = "0.11.0" }
 prost = { version = "0.12" }
 tower-http = { version = "0.4.0", features = ["cors"] }
 http = "1.1.0"
+r2d2 = "0.8.10"
+sqlite = "0.36.0"
 
 [build-dependencies]
 tonic-build = { version = "0.11.0", features = ["prost"] }

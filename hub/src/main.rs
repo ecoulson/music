@@ -2,8 +2,10 @@ use std::{fs::File, io::Read};
 
 use hub::{
     hub_server::{Hub, HubServer},
-    StreamAudioRequest, StreamAudioResponse,
+    GetTrackListRequest, GetTrackListResponse, StreamAudioRequest, StreamAudioResponse, Track,
 };
+use r2d2::{ManageConnection, Pool, PooledConnection};
+use sqlite::Connection;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{transport::Server, Request, Response, Status};
 use tower_http::cors::CorsLayer;
@@ -44,8 +46,28 @@ where
     }
 }
 
-#[derive(Debug, Default)]
-pub struct HubService {}
+struct SqliteConnectionManager {}
+
+impl ManageConnection for SqliteConnectionManager {
+    type Error = sqlite::Error;
+    type Connection = Connection;
+
+    fn connect(&self) -> Result<Self::Connection, Self::Error> {
+        sqlite::Connection::open("hub")
+    }
+
+    fn is_valid(&self, conn: &mut Self::Connection) -> Result<(), Self::Error> {
+        conn.execute("")
+    }
+
+    fn has_broken(&self, _: &mut Self::Connection) -> bool {
+        false
+    }
+}
+
+pub struct HubService {
+    connection_pool: Pool<SqliteConnectionManager>,
+}
 
 #[tonic::async_trait]
 impl Hub for HubService {
@@ -73,14 +95,38 @@ impl Hub for HubService {
 
         Ok(Response::new(ReceiverStream::new(receiver)))
     }
+
+    async fn get_track_list(
+        &self,
+        _request: Request<GetTrackListRequest>,
+    ) -> Result<Response<GetTrackListResponse>, Status> {
+        Ok(Response::new(GetTrackListResponse {
+            tracks: vec![Track {
+                track_id: String::from("0"),
+                track_path: String::from(""),
+            }],
+        }))
+    }
+}
+
+fn initialize_schema(connection: PooledConnection<SqliteConnectionManager>) {
+    connection
+        .execute(
+            "CREATE TABLE IF NOT EXISTS Tracks (
+                TrackId VARCHAR(128),
+                TrackPath VARCHAR(256)
+            )",
+        )
+        .expect("Should create table");
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let address = "0.0.0.0:8000".parse()?;
-    let hub_service = HubService::default();
+    let connection_pool = Pool::new(SqliteConnectionManager {}).expect("Create connection");
+    initialize_schema(connection_pool.get().expect("Create schema"));
+    let hub_service = HubService { connection_pool };
     let hub = HubServer::new(hub_service);
-
     Server::builder()
         .accept_http1(true)
         .layer(CorsLayer::permissive())
@@ -93,22 +139,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 #[cfg(test)]
 pub mod tests {
+    use r2d2::Pool;
     use std::fs;
     use tokio_stream::StreamExt;
     use tonic::Request;
 
     use crate::{
         hub::{hub_server::Hub, StreamAudioRequest},
-        HubService,
+        HubService, SqliteConnectionManager,
     };
 
     #[tokio::test]
     async fn should_stream_file() {
-        let service = HubService::default();
+        let service = HubService {
+            connection_pool: Pool::new(SqliteConnectionManager {}).expect("Should create pool"),
+        };
         let expected_buffer = fs::read("/home/ecoulson/Code/music/test_audio/test.mp3").unwrap();
 
         let mut response = service
-            .stream_audio(Request::new(StreamAudioRequest {}))
+            .stream_audio(Request::new(StreamAudioRequest {
+                track_id: String::new(),
+            }))
             .await
             .unwrap()
             .into_inner();

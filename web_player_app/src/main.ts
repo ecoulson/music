@@ -52,7 +52,7 @@ function expectElementWithId<T extends HTMLElement>(id: string): T {
 }
 
 function handleVolumeAdjustment(event: MouseEvent) {
-    volumeLevel = event.clientX / volumeControl.clientWidth;
+    volumeLevel = Math.floor(event.clientX / volumeControl.clientWidth);
     console.log(volumeLevel);
     gainNode.gain.setValueAtTime(volumeLevel, audioContext.currentTime);
     volumeControlScrubber.style.left = `${event.clientX}px`;

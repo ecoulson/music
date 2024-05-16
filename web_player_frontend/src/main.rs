@@ -20,6 +20,7 @@ struct HomePage {
 #[template(path = "player.html")]
 struct PlayerComponent {
     state: PlayerStateComponent,
+    gain: usize,
 }
 
 #[derive(Template)]
@@ -92,6 +93,7 @@ async fn render_home_page() -> impl IntoResponse {
             state: PlayerStateComponent {
                 track_id: String::new(),
             },
+            gain: 100,
         },
     }
 }

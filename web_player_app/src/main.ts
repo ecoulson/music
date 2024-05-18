@@ -27,7 +27,6 @@ const playbackController = expectElementWithId("playback-state");
 const playbackScrubber = expectElementWithId("playback-scrubber");
 const playbackScrubberControl = expectElementWithId("playback-scrubber-control");
 const volumeControl = expectElementWithId("volume-control");
-const volumeControlScrubber = expectElementWithId("volume-control-scrubber");
 
 let nextTimeMs = 0;
 let lastTimeMs = 0;
@@ -39,7 +38,32 @@ let volumeLevel = 1;
 
 gainNode.connect(audioContext.destination);
 playbackController.addEventListener("click", handlePlaybackState);
-volumeControl.addEventListener("click", handleVolumeAdjustment);
+
+setupSlider("playback-scrubber", (x) => {
+    console.log(`Playback is scrubbed: ${x}`);
+});
+setupSlider("volume-control", (x) => {
+    volumeLevel = x / volumeControl.clientWidth;
+    gainNode.gain.setValueAtTime(volumeLevel, audioContext.currentTime);
+});
+
+function setupSlider(containerId: string, onPositionChange: (position: number) => void) {
+    const control = expectElementWithId(containerId);
+    const scrubber = control.getElementsByClassName("scrubber").item(0) as HTMLElement;
+    const mouseMoveHandler = (event: MouseEvent) => handleSlide(event, control, scrubber, onPositionChange);
+
+    if (!scrubber) {
+        console.error(`Scrubber not found for ${containerId}`);
+    }
+
+    control.addEventListener("mousedown", (event) => {
+        handleSlide(event, control, scrubber, onPositionChange);
+        document.addEventListener("mousemove", mouseMoveHandler);
+    });
+    document.addEventListener("mouseup", () => {
+        document.removeEventListener("mousemove", mouseMoveHandler);
+    });
+}
 
 function expectElementWithId<T extends HTMLElement>(id: string): T {
     const element = document.getElementById(id);
@@ -51,11 +75,15 @@ function expectElementWithId<T extends HTMLElement>(id: string): T {
     return element as T;
 }
 
-function handleVolumeAdjustment(event: MouseEvent) {
-    volumeLevel = Math.floor(event.clientX / volumeControl.clientWidth);
-    console.log(volumeLevel);
-    gainNode.gain.setValueAtTime(volumeLevel, audioContext.currentTime);
-    volumeControlScrubber.style.left = `${event.clientX}px`;
+function clamp(value: number, min: number, max: number) {
+    return Math.max(min, Math.min(max, value));
+}
+
+function handleSlide(event: MouseEvent, sliderContainer: HTMLElement, scrubber: HTMLElement, onPositionChange: (position: number) => void) {
+    const containerX = sliderContainer.getBoundingClientRect().x;
+    const x = clamp(event.clientX - containerX, 0, sliderContainer.clientWidth);
+    scrubber.style.left = `${x}px`;
+    onPositionChange(x);
 }
 
 function handlePlaybackTick(): PlaybackState {

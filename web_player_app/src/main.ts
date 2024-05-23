@@ -1,6 +1,8 @@
 import { HubClient } from "../generated/HubServiceClientPb";
 import { StreamAudioRequest, StreamAudioResponse } from "../generated/hub_pb";
 
+type SliderCallback = (ratio: number) => void;
+
 enum PlaybackState {
     Paused,
     Playing,
@@ -20,13 +22,88 @@ class AudioChunk {
     }
 }
 
-const service = new HubClient("http://10.0.0.142:8000");
+class Optional<T> {
+    value: T | null;
+
+    constructor() {
+        this.value = null;
+    }
+
+    static of<T>(value: T) {
+        let optional = new Optional<T>();
+        optional.value = value;
+        return optional;
+    }
+
+    static empty() {
+        return new Optional<any>();
+    }
+
+    unwrap(): T {
+        if (!this.value) {
+            throw new Error("Unwrap optional");
+        }
+
+        return this.value;
+    }
+
+    isEmpty(): boolean {
+        return this.value == null;
+    }
+}
+
+class Result<T, E> {
+    value: T | null;
+    error: E | null;
+
+    constructor() {
+        this.value = null;
+        this.error = null
+    };
+
+    static ok<T>(value: T): Result<T, any> {
+        let result = new Result<T, any>();
+        result.value = value;
+        return result;
+    }
+
+    static error<E>(error: E): Result<any, E> {
+        let result = new Result<any, E>();
+        result.error = error;
+        return result;
+    }
+
+    unwrap(): T {
+        if (!this.value) {
+            throw new Error("Unwrapped empty result");
+        }
+
+        return this.value;
+    }
+}
+
+class Slider {
+    container: HTMLDivElement;
+    scrubber: HTMLDivElement;
+    input: HTMLInputElement;
+
+    constructor(
+        container: HTMLDivElement,
+        scrubber: HTMLDivElement,
+        input: HTMLInputElement,
+    ) {
+        this.scrubber = scrubber;
+        this.container = container;
+        this.input = input;
+    }
+}
+
+const service = new HubClient("http://localhost:8000");
 const audioContext = new AudioContext();
 const gainNode = audioContext.createGain();
 const playbackController = expectElementWithId("playback-state");
 const playbackScrubber = expectElementWithId("playback-scrubber");
 const playbackScrubberControl = expectElementWithId("playback-scrubber-control");
-const volumeControl = expectElementWithId("volume-control");
 
 let nextTimeMs = 0;
 let lastTimeMs = 0;
@@ -34,35 +111,81 @@ let nextChunkId = 0;
 let idleChunks: AudioChunk[] = [];
 let playbackState: PlaybackState = PlaybackState.Empty;
 let durationMs = 0;
-let volumeLevel = 1;
+let isScrubbing = false
 
 gainNode.connect(audioContext.destination);
 playbackController.addEventListener("click", handlePlaybackState);
 
-setupSlider("playback-scrubber", (x) => {
-    console.log(`Playback is scrubbed: ${x}`);
-});
-setupSlider("volume-control", (x) => {
-    volumeLevel = x / volumeControl.clientWidth;
-    gainNode.gain.setValueAtTime(volumeLevel, audioContext.currentTime);
-});
+createSlider(
+    "playback-scrubber",
+    Optional.of(handlePlaybackSlide),
+    Optional.of(handlePlaybackSlideStart),
+    Optional.of(handlePlaybackSlideEnd)
+).unwrap();
+createSlider("volume-control", Optional.of(handleVolumeSlide)).unwrap();
 
-function setupSlider(containerId: string, onPositionChange: (position: number) => void) {
-    const control = expectElementWithId(containerId);
-    const scrubber = control.getElementsByClassName("scrubber").item(0) as HTMLElement;
-    const mouseMoveHandler = (event: MouseEvent) => handleSlide(event, control, scrubber, onPositionChange);
+function handlePlaybackSlide(value: number) {
+    console.log(`Playback is scrubbed: ${(value * 100).toFixed(0)}%`);
+}
+
+function handlePlaybackSlideStart() {
+    isScrubbing = true;
+}
+
+function handlePlaybackSlideEnd() {
+    isScrubbing = false;
+}
+
+function handleVolumeSlide(volumeLevel: number) {
+    gainNode.gain.setValueAtTime(volumeLevel, audioContext.currentTime);
+}
+
+function createSlider(
+    containerId: string,
+    onSlide: Optional<SliderCallback> = Optional.empty(),
+    onSlideStart: Optional<SliderCallback> = Optional.empty(),
+    onSlideEnd: Optional<SliderCallback> = Optional.empty()
+): Result<Slider, string> {
+    const container = expectElementWithId<HTMLDivElement>(containerId);
+    const scrubber = container.getElementsByClassName("scrubber").item(0);
+    const input = container.getElementsByClassName("slider-input").item(0);
 
     if (!scrubber) {
-        console.error(`Scrubber not found for ${containerId}`);
+        return Result.error("No scrubber found");
     }
 
-    control.addEventListener("mousedown", (event) => {
-        handleSlide(event, control, scrubber, onPositionChange);
+    if (!input) {
+        return Result.error("No input found");
+    }
+
+    const slider = new Slider(container, scrubber as HTMLDivElement, input as HTMLInputElement);
+    slider.scrubber.style.left = `${slider.input.value}%`;
+    container.addEventListener("mousedown", (event) => {
+        const mouseMoveHandler = (event: MouseEvent) => {
+            const position = moveSlider(event, slider);
+
+            if (!onSlide.isEmpty()) {
+                onSlide.unwrap()(position);
+            }
+        }
+
+        if (!onSlideStart.isEmpty()) {
+            onSlideStart.unwrap()(moveSlider(event, slider));
+        }
+
         document.addEventListener("mousemove", mouseMoveHandler);
+        document.addEventListener("mouseup", (event) => {
+            if (!onSlideEnd.isEmpty()) {
+                onSlideEnd.unwrap()(moveSlider(event, slider))
+            }
+
+            document.removeEventListener("mousemove", mouseMoveHandler);
+        }, {
+            once: true
+        });
     });
-    document.addEventListener("mouseup", () => {
-        document.removeEventListener("mousemove", mouseMoveHandler);
-    });
+
+    return Result.ok(slider);
 }
 
 function expectElementWithId<T extends HTMLElement>(id: string): T {
@@ -79,11 +202,16 @@ function clamp(value: number, min: number, max: number) {
     return Math.max(min, Math.min(max, value));
 }
 
-function handleSlide(event: MouseEvent, sliderContainer: HTMLElement, scrubber: HTMLElement, onPositionChange: (position: number) => void) {
-    const containerX = sliderContainer.getBoundingClientRect().x;
-    const x = clamp(event.clientX - containerX, 0, sliderContainer.clientWidth);
-    scrubber.style.left = `${x}px`;
-    onPositionChange(x);
+function moveSlider(
+    event: MouseEvent,
+    slider: Slider,
+): number {
+    const containerX = slider.container.getBoundingClientRect().x;
+    const x = clamp(event.clientX - containerX, 0, slider.container.getBoundingClientRect().width);
+    slider.scrubber.style.left = `${x}px`;
+    slider.input.value = (x / slider.container.getBoundingClientRect().width).toString();
+
+    return x / slider.container.getBoundingClientRect().width;
 }
 
 function handlePlaybackTick(): PlaybackState {
@@ -102,7 +230,7 @@ function handlePlaybackTick(): PlaybackState {
     }
 
     let width = playbackScrubber.clientWidth;
-    let amountPlayedSec = audioContext.getOutputTimestamp().contextTime;
+    let amountPlayedSec = audioContext.currentTime;
 
     if (!amountPlayedSec) {
         console.error("Couldn't retreive context time");
@@ -120,7 +248,9 @@ function handlePlaybackTick(): PlaybackState {
         return PlaybackState.Complete;
     }
 
-    playbackScrubberControl.style.left = `${(width * progress).toFixed(0)}px`;
+    if (!isScrubbing) {
+        playbackScrubberControl.style.left = `${width * progress}px`;
+    }
 
     return PlaybackState.Playing;
 }

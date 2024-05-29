@@ -2,7 +2,8 @@
   "name": "web_player_frontend",
   "version": "1.0.0",
   "scripts": {
-    "format": "prettier --write --ignore-unknown ."
+    "format": "prettier --write --ignore-unknown .",
+    "styles": "pnpm dlx tailwindcss -i styles/tailwind.css -o assets/main.css --watch"
   },
   "devDependencies": {
     "prettier": "^3.2.5",

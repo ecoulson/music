@@ -8,7 +8,8 @@
     </div>
     <div class="h-4 w-64 bg-gray-300 relative" id="volume-control">
         <input value="{{ gain }}" hidden class="slider-input" />
-        <div class="scrubber h-4 rounded-full w-4 bg-gray-500 absolute transform" style="transform: translate(-50%);"
+        <div class="scrubber h-4 rounded-full w-4 bg-gray-500 absolute transform" 
+            style="transform: translate(-50%); left: {{ gain }}%;"
             class="scrubber"></div>
     </div>
     <button id="playback-state">Play</button>

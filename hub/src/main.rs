@@ -78,7 +78,7 @@ impl Hub for HubService {
         _request: Request<StreamAudioRequest>,
     ) -> Result<Response<Self::StreamAudioStream>, Status> {
         let (sender, receiver) = tokio::sync::mpsc::channel(128);
-        let file = File::open("/Users/evancoulson/Code/music/test_audio/test.mp3")?;
+        let file = File::open("/home/ecoulson/Code/music/test_audio/test.mp3")?;
 
         tokio::spawn(async move {
             let reader = ChunkedReader::new(file);

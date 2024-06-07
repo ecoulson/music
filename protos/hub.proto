@@ -6,7 +6,7 @@ message StreamAudioRequest  {
 }
 
 message StreamAudioResponse {
-    uint64 chunk_id = 1;
+    uint32 chunk_id = 1;
     bytes chunk = 2;
 }
 
@@ -20,7 +20,8 @@ message GetTrackListResponse {
 
 message Track {
     string track_id = 1;
-    string track_path = 2;
+    string hub_id = 2;
+    uint32 duration_milliseconds = 3;
 }
 
 service Hub {

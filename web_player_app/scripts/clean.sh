@@ -1,5 +1,7 @@
 #!/bin/bash
 
+trap 'exit' ERR
+
 BASE_DIR=$(dirname $0)
 GENERATED_DIR=$BASE_DIR/../generated
 NODE_MODULES_DIR=$BASE_DIR/../node_modules

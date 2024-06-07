@@ -1,11 +1,10 @@
-import { HubClient } from "../generated/HubServiceClientPb";
-import { StreamAudioRequest, StreamAudioResponse } from "../generated/hub_pb";
-import { createTrackLoader, loadTrack } from "./audio";
+import { Track } from "../generated/hub";
 import { mount } from "./dom";
 import { Optional } from "./optional";
 import { Result } from "./result";
-import { Slider, mountSlider, repositionSlider } from "./slider";
-import { Time } from "./time";
+import { Scheduler, createScheduler, queueTrack } from "./scheduler";
+import { Slider, addSliderHandlers, createSlider, mountSlider, repositionSlider } from "./slider";
+import { Duration, Time } from "./time";
 
 type AudioStateChangeHandler = (state: PlaybackState) => void;
 
@@ -18,35 +17,33 @@ enum PlaybackState {
     Complete,
 }
 
-interface PlayerAudio {
+export interface AudioOutput {
     context: AudioContext;
     gainNode: GainNode;
 }
 
 export interface Player {
     playbackState: PlaybackState;
-    audioOutput: PlayerAudio;
+    audioOutput: AudioOutput;
     volumeSlider: Slider;
     playbackSlider: Slider;
     playbackController: HTMLButtonElement;
+    scheduler: Scheduler;
+    currentTrackPlayback: Optional<TrackPlayback>
+}
+
+interface TrackPlayback {
+    position: Time;
+    duration: Duration;
+    track: Track;
+    intervalId: number;
 }
 
 interface PlayerHandlers {
     onPlaybackStateChange: Optional<AudioStateChangeHandler>;
 }
 
-interface AudioChunk {
-    buffer: AudioBuffer;
-    chunkId: number;
-}
-
-let nextTimeMs = 0;
-let lastTimeMs = 0;
-let nextChunkId = 0;
-let idleChunks: AudioChunk[] = [];
-let durationMs = 0;
-
-function createAudioOutput(): PlayerAudio {
+function createAudioOutput(): AudioOutput {
     const context = new AudioContext();
     const gainNode = context.createGain();
     gainNode.connect(context.destination);
@@ -57,7 +54,7 @@ function createAudioOutput(): PlayerAudio {
     };
 }
 
-function setVolume(output: PlayerAudio, volumeLevel: number): void {
+function setVolume(output: AudioOutput, volumeLevel: number): void {
     output.gainNode.gain.setValueAtTime(volumeLevel, output.context.currentTime);
 }
 
@@ -79,27 +76,35 @@ function createPlayer(rootSelector: string): Result<Player, string> {
     }
 
     const audioOutput = createAudioOutput();
-    const playbackSlider = mountSlider("#playback-scrubber", {
-        onSlide: Optional.of(handlePlaybackSlide),
-        onSlideStart: Optional.empty(),
-        onSlideEnd: Optional.empty()
-    }).unwrap();
+    const playbackSlider = createSlider("#playback-scrubber");
     const volumeSlider = mountSlider("#volume-control", {
         onSlideEnd: Optional.empty(),
         onSlideStart: Optional.empty(),
         onSlide: Optional.of((volume) => setVolume(audioOutput, volume)),
     }).unwrap();
 
+    if (!playbackSlider.ok()) {
+        return Result.error(playbackSlider.error());
+    }
+
     return Result.ok({
         playbackState: PlaybackState.Unknown,
         audioOutput,
         playbackController,
-        playbackSlider,
-        volumeSlider
+        playbackSlider: playbackSlider.unwrap(),
+        volumeSlider,
+        scheduler: createScheduler(/*buffer_size=*/5),
+        currentTrackPlayback: Optional.empty()
     });
 }
 
 function addPlayerHandlers(player: Player, handlers: PlayerHandlers): Result<boolean, string> {
+    addSliderHandlers(player.playbackSlider, {
+        onSlide: Optional.of((value) => handlePlaybackSlide(player, value)),
+        onSlideStart: Optional.empty(),
+        onSlideEnd: Optional.empty()
+    }).unwrap();
+
     player.playbackController.addEventListener("click", () => handlePlaybackState(player));
     player.audioOutput.context.addEventListener("statechange", () => {
         switch (player.audioOutput.context.state) {
@@ -117,7 +122,7 @@ function addPlayerHandlers(player: Player, handlers: PlayerHandlers): Result<boo
                 break;
         }
 
-        if (!handlers.onPlaybackStateChange.isEmpty()) {
+        if (handlers.onPlaybackStateChange.some()) {
             handlers.onPlaybackStateChange.unwrap()(player.playbackState);
         }
     });
@@ -146,6 +151,7 @@ function tooglePlaybackController(player: Player, state: PlaybackState) {
 function handlePlaybackState(player: Player) {
     const stateElement = document.getElementById("playback-state");
     const trackIdInput: HTMLInputElement = document.getElementById("playback-track-id") as HTMLInputElement;
+    const trackHubIdInput: HTMLInputElement = document.getElementById("playback-hub-id") as HTMLInputElement;
 
     if (!stateElement) {
         console.error("Failed to get playback state component");
@@ -157,6 +163,11 @@ function handlePlaybackState(player: Player) {
         return;
     }
 
+    if (!trackHubIdInput) {
+        console.error("Failed to get track hub id");
+        return;
+    }
+
     switch (player.playbackState) {
         case PlaybackState.Paused:
             play(player.audioOutput);
@@ -165,14 +176,42 @@ function handlePlaybackState(player: Player) {
             pause(player.audioOutput);
             break;
         case PlaybackState.Unknown:
-            const trackLoader = createTrackLoader(
-                player.audioOutput,
-                new HubClient("http://10.0.0.142:8000"),
-            );
             stateElement.textContent = "Pause";
             player.playbackState = PlaybackState.Loading;
-            loadTrack(trackLoader, trackIdInput.value).then((track) => console.log(track));
-            startAudioPlaybackMonitoring(player);
+            // Fetch track instead
+            const track = Track.create({
+                trackId: trackIdInput.value,
+                hubId: trackHubIdInput.value,
+                durationMilliseconds: 472436.9841269841
+            });
+            queueTrack(player.scheduler, player.audioOutput, track).then((event) => {
+                if (!event.ok()) {
+                    console.error("Failed to queue track", event.error());
+                    player.playbackState = PlaybackState.Error;
+                    return;
+                }
+
+                if (event.unwrap().none()) {
+                    console.error("Lazy loading track");
+                    player.playbackState = PlaybackState.Error;
+                    return;
+                }
+
+                console.log(player);
+                if (player.currentTrackPlayback.none()) {
+                    console.error("No playback set");
+                    player.playbackState = PlaybackState.Error;
+                    return;
+                }
+
+                const currentTrackPlayback = player.currentTrackPlayback.unwrap();
+                const queuedTrack = event.unwrap().unwrap().track;
+
+                if (currentTrackPlayback.track.trackId === queuedTrack.trackId) {
+                    player.currentTrackPlayback = Optional.of(
+                        createTrackPlayback(track, startAudioPlaybackMonitoring(player)));
+                }
+            });
             break;
         case PlaybackState.Loading:
             break;
@@ -182,15 +221,15 @@ function handlePlaybackState(player: Player) {
     }
 }
 
-function pause(audioOutput: PlayerAudio): void {
+function pause(audioOutput: AudioOutput): void {
     audioOutput.context.suspend();
 }
 
-function play(audioOutput: PlayerAudio): void {
+function play(audioOutput: AudioOutput): void {
     audioOutput.context.resume();
 }
 
-function getOutputCurrentTimeMs(output: PlayerAudio): Result<Time, string> {
+function getOutputCurrentTimeMs(output: AudioOutput): Result<Time, string> {
     let currentTimeSeconds = output.context.getOutputTimestamp().contextTime;
 
     if (typeof currentTimeSeconds === "undefined") {
@@ -200,21 +239,20 @@ function getOutputCurrentTimeMs(output: PlayerAudio): Result<Time, string> {
     return Result.ok(Time.fromUnixSeconds(currentTimeSeconds));
 }
 
-function handlePlaybackTick(player: Player): PlaybackState {
-    let currentTimeResult = getOutputCurrentTimeMs(player.audioOutput);
+function handlePlaybackTick(player: Player, trackPlayback: TrackPlayback): PlaybackState {
+    let currentTime = getOutputCurrentTimeMs(player.audioOutput);
 
-    if (!currentTimeResult.ok()) {
+    if (!currentTime.ok()) {
         console.error("Couldn't retreive context time");
         return PlaybackState.Loading;
     }
-
-    let currentTime = currentTimeResult.unwrap();
 
     if (player.playbackState != PlaybackState.Playing) {
         return player.playbackState;
     }
 
-    let progress = currentTime.milliseconds() / durationMs;
+    let progress = currentTime.unwrap().milliseconds() /
+        trackPlayback.duration.milliseconds()
 
     if (isNaN(progress) || !isFinite(progress)) {
         console.error("Playback being handled before audio loaded");
@@ -232,9 +270,18 @@ function handlePlaybackTick(player: Player): PlaybackState {
     return PlaybackState.Playing;
 }
 
-function startAudioPlaybackMonitoring(player: Player) {
+function startAudioPlaybackMonitoring(player: Player): number {
     const intervalId = setInterval(() => {
-        switch (handlePlaybackTick(player)) {
+        if (player.currentTrackPlayback.none()) {
+            console.error("No current track playing");
+            clearInterval(intervalId);
+            return;
+        }
+
+        const currentTrackPlayback = player.currentTrackPlayback.unwrap();
+        currentTrackPlayback.position.add(Time.fromUnixMilliseconds(100));
+
+        switch (handlePlaybackTick(player, currentTrackPlayback)) {
             case PlaybackState.Error:
             case PlaybackState.Complete:
                 clearInterval(intervalId);
@@ -243,8 +290,21 @@ function startAudioPlaybackMonitoring(player: Player) {
                 break;
         }
     }, 100);
+
+    return intervalId;
 }
 
-function handlePlaybackSlide(value: number) {
-    console.log(`Playback is scrubbed: ${(value * 100).toFixed(0)}%`);
+function createTrackPlayback(track: Track, intervalId: number): TrackPlayback {
+    return {
+        track,
+        intervalId,
+        position: Time.fromUnixSeconds(0),
+        duration: Duration.fromMilliseconds(track.durationMilliseconds)
+    }
+}
+
+function handlePlaybackSlide(player: Player, value: number) {
+    const offset = Time.fromUnixMilliseconds(
+        player.scheduler.bufferedTracks[0].duration.milliseconds() * value);
+    console.log(offset);
 }

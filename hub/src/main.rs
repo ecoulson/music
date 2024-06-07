@@ -103,7 +103,8 @@ impl Hub for HubService {
         Ok(Response::new(GetTrackListResponse {
             tracks: vec![Track {
                 track_id: String::from("0"),
-                track_path: String::from(""),
+                hub_id: String::from("10.0.0.142:8000"),
+                duration_milliseconds: 472437
             }],
         }))
     }

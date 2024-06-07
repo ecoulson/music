@@ -1,6 +1,6 @@
 export class Result<T, E> {
-    value_: T | null;
-    error_: E | null;
+    private value_: T | null;
+    private error_: E | null;
 
     constructor(value: T | null = null, error: E | null = null) {
         this.value_ = value;

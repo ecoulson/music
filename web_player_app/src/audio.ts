@@ -1,29 +1,28 @@
-import { HubClient } from "../generated/HubServiceClientPb";
-import { StreamAudioRequest, StreamAudioResponse } from "../generated/hub_pb";
+import { MPEGDecodedAudio } from "mpg123-decoder";
+import { HubClient } from "../generated/hub.client";
+import { StreamAudioRequest, Track } from "../generated/hub";
 import { Result } from "./result";
 import { Duration, Time, Timerange } from "./time";
 
-export interface Track {
+export interface Audio {
     trackId: string;
     duration: Duration;
-    trackNodes: TrackNode[];
+    segments: AudioSegment[];
     scheduledTimeRange: Timerange;
 }
 
-interface TrackNode {
-    audioBufferSourceNode: AudioBufferSourceNode;
-    createdTime: Time;
+interface AudioSegment {
+    audioBufferSource: AudioBufferSourceNode;
     scheduledTime: Time;
-    duration: Time;
+    duration: Duration;
 }
 
 interface AudioChunk {
     buffer: AudioBuffer;
-    raw: ArrayBuffer;
     chunkId: number;
 }
 
-interface TrackLoader {
+interface AudioLoader {
     audio: PlayerAudio;
     hubClient: HubClient;
 }
@@ -33,68 +32,99 @@ interface PlayerAudio {
     gainNode: GainNode;
 }
 
-export function createTrackLoader(audio: PlayerAudio, hubClient: HubClient): TrackLoader {
+export function playAudioSegment(audio: AudioSegment, offset: Duration) {
+    audio.audioBufferSource.start(offset.seconds() + audio.scheduledTime.seconds());
+}
+
+export function createAudioLoader(audio: PlayerAudio, hubClient: HubClient): AudioLoader {
     return {
         audio,
         hubClient,
     };
 }
 
-export function loadTrack(loader: TrackLoader, trackId: string): Promise<Result<Track, DOMException>> {
-    const request = new StreamAudioRequest();
-    request.setTrackId(trackId);
+export function loadAudioForTrack(
+    loader: AudioLoader,
+    track: Track,
+    onSegmentLoaded: (segment: AudioSegment) => void
+): Promise<Result<Audio, DOMException>> {
+    const request = StreamAudioRequest.create({
+        trackId: track.trackId
+    });
     const stream = loader.hubClient.streamAudio(request, {});
 
-    return new Promise((resolve) => {
-        const trackNodes: TrackNode[] = [];
-        let idleChunks: StreamAudioResponse[] = [];
-        let nextId = 0;
-        let trackBuffer: ArrayBuffer = new Uint8Array(0);
-        const audioBufferSource = loader.audio.context.createBufferSource();
-        audioBufferSource.connect(loader.audio.gainNode);
+    return new Promise(async (resolve) => {
+        const audioSegments: AudioSegment[] = [];
+        let idleChunks: AudioChunk[] = [];
+        let decodingTasks: Promise<any>[] = [];
+        const { MPEGDecoderWebWorker } = await import("mpg123-decoder");
+        const worker = new MPEGDecoderWebWorker();
 
-        stream.on('data', async (audioChunk) => {
-            if (audioChunk.getChunkId() == nextId) {
-                scheduleAudioChunk(loader, trackBuffer, audioChunk);
-            }
+        stream.responses.onMessage((response) => {
+            decodingTasks.push(worker.decodeFrame(response.chunk).then((decodedAudio) => {
+                const audioBufferSource = loader.audio.context.createBufferSource();
+                const audioChunk = createMpegAudioChunk(response.chunkId, decodedAudio);
+                audioBufferSource.connect(loader.audio.gainNode);
 
-            idleChunks = insertChunk(audioChunk, idleChunks);
-
-            while (idleChunks.length > 0 && idleChunks[0].getChunkId() == nextId) {
-                scheduleAudioChunk(loader, trackBuffer, idleChunks.shift()!);
-            }
-        });
-        stream.on('data', (response) => {
-            loader.audio.context.decodeAudioData(response.getChunk_asU8().buffer, (buffer) => {
-                const audioChunk = {
-                    chunkId: response.getChunkId(),
-                    buffer,
-                    raw: response.getChunk_asU8().buffer
-                };
-
-                if (audioChunk.chunkId == trackNodes.length) {
-                    trackNodes.push(scheduleTrackNode(loader, audioChunk, trackNodes));
+                if (audioChunk.chunkId == audioSegments.length) {
+                    const segment = createAudioSegment(audioBufferSource, audioChunk, audioSegments);
+                    onSegmentLoaded(segment);
+                    audioSegments.push(segment);
+                    return;
                 }
 
                 idleChunks = insertChunk(audioChunk, idleChunks);
 
-                while (idleChunks.length > 0 && idleChunks[0].chunkId == trackNodes.length) {
-                    console.log(idleChunks[0].chunkId);
-                    trackNodes.push(scheduleTrackNode(loader, idleChunks.shift()!, trackNodes));
+                while (idleChunks.length > 0 && idleChunks[0].chunkId == audioSegments.length) {
+                    const segment = createAudioSegment(
+                        audioBufferSource,
+                        idleChunks.shift()!,
+                        audioSegments
+                    );
+                    onSegmentLoaded(segment);
+                    audioSegments.push(segment);
                 }
-            }, (error) => resolve(Result.error(error)));
-        }).on("end", function() {
+            }).catch((error) => resolve(Result.error(error))));
+        })
+        stream.responses.onComplete(async () => {
+            await Promise.all(decodingTasks);
+            const trackDuration = audioSegments.reduce<Duration>((duration, trackNode) =>
+                duration.add(trackNode.duration), Duration.fromSeconds(0));
+
             resolve(Result.ok({
-                trackId: trackId,
-                trackNodes,
-                duration: Duration.fromSeconds(0),
+                trackId: track.trackId,
+                segments: audioSegments,
+                duration: trackDuration,
                 scheduledTimeRange: {
                     start: Time.fromUnixSeconds(0),
-                    end: Time.fromUnixSeconds(0),
+                    end: Time.fromUnixSeconds(trackDuration.seconds()),
                 }
             }));
-        })
+        });
+
     });
+}
+
+function createMpegAudioChunk(chunkId: number, decodedAudio: MPEGDecodedAudio): AudioChunk {
+    return {
+        chunkId,
+        buffer: createAudioBufferFromDecodedMpegFrame(decodedAudio)
+    };
+
+}
+
+function createAudioBufferFromDecodedMpegFrame(decodedAudio: MPEGDecodedAudio) {
+    const audioBuffer = new AudioBuffer({
+        sampleRate: decodedAudio.sampleRate,
+        length: decodedAudio.channelData[0].length,
+        numberOfChannels: decodedAudio.channelData.length
+    });
+
+    for (let channel = 0; channel < decodedAudio.channelData.length; channel++) {
+        audioBuffer.getChannelData(channel).set(decodedAudio.channelData[channel]);
+    }
+
+    return audioBuffer;
 }
 
 function insertChunk(audioChunk: AudioChunk, idleChunks: AudioChunk[]): AudioChunk[] {
@@ -116,79 +146,24 @@ function insertChunk(audioChunk: AudioChunk, idleChunks: AudioChunk[]): AudioChu
     return newIdleChunks;
 }
 
-function scheduleTrackNode(
-    loader: TrackLoader,
+function createAudioSegment(
+    audioBufferSource: AudioBufferSourceNode,
     audioChunk: AudioChunk,
-    trackNodes: TrackNode[]
-): TrackNode {
-    const audioBufferSource = loader.audio.context.createBufferSource();
-    audioBufferSource.connect(loader.audio.gainNode);
-    audioBufferSource.buffer = audioChunk.buffer;
-    audioBufferSource.loop = false;
-    let nextTimeMs = 0;
+    trackNodes: AudioSegment[]
+): AudioSegment {
+    let scheduledTimeSeconds = 0;
 
     if (trackNodes.length > 0) {
         let previousTrackNode = trackNodes[trackNodes.length - 1];
-        /*
-        let firstTrackNode = trackNodes[0];
-        let startDelta =
-            Date.now() - firstTrackNode.createdTime.milliseconds();
-        nextTimeMs =
-            previousTrackNode.duration.milliseconds() +
-            previousTrackNode.scheduledTime.milliseconds() - startDelta;
-        */
-        previousTrackNode.audioBufferSourceNode.addEventListener("ended", () => {
-            audioBufferSource.start();
-        })
-    } else {
-        audioBufferSource.start();
+        scheduledTimeSeconds = previousTrackNode.duration.seconds()
+            + previousTrackNode.scheduledTime.seconds();
     }
 
-    /*
-    setTimeout(() => {
-        audioBufferSource.start();
-        let currentMs = new Date().getTime();
-        let lastTimeMs = 0;
-
-        if (trackNodes.length == 0) {
-            lastTimeMs = currentMs;
-        } else {
-            lastTimeMs = trackNodes[trackNodes.length - 1].scheduledTime.milliseconds();
-        }
-
-        console.log(`Starting next buffer: Chunk ${audioChunk.chunkId}`);
-        console.log(`Delta (s): ${(currentMs - lastTimeMs) / 1000.0}`);
-        console.log(`Buffer duration ${audioChunk.buffer.duration}s`);
-    }, nextTimeMs);
-
-    console.log(`Scheduling a buffer for ${(nextTimeMs / 1000)}s`);
-    */
+    audioBufferSource.buffer = audioChunk.buffer;
 
     return {
+        audioBufferSource,
         duration: Duration.fromSeconds(audioChunk.buffer.duration),
-        createdTime: Time.nowUtc(),
-        scheduledTime: Time.fromUnixMilliseconds(nextTimeMs),
-        audioBufferSourceNode: audioBufferSource
+        scheduledTime: Time.fromUnixSeconds(scheduledTimeSeconds),
     }
 }
-
-function appendChunk(trackBuffer: ArrayBuffer, audioChunk: StreamAudioResponse): Uint8Array {
-    const responseBuffer = audioChunk.getChunk_asU8();
-    const buffer = new Uint8Array(trackBuffer.byteLength + responseBuffer.byteLength);
-    const trackArray = new Uint8Array(trackBuffer);
-    const chunkBuffer = new Uint8Array(responseBuffer);
-    buffer.set(trackArray, 0);
-    buffer.set(chunkBuffer, responseBuffer.byteLength);
-
-    return buffer;
-}
-
-function scheduleAudioChunk(
-    loader: TrackLoader,
-    trackBuffer: ArrayBuffer,
-    audioChunk: StreamAudioResponse
-) {
-    const newTrackBuffer = appendChunk(trackBuffer, audioChunk);
-
-}
-

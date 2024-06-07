@@ -1,5 +1,5 @@
 export class Optional<T> {
-    value: T | null;
+    private value: T | null;
 
     constructor() {
         this.value = null;
@@ -23,7 +23,11 @@ export class Optional<T> {
         return this.value;
     }
 
-    isEmpty(): boolean {
+    some(): boolean {
+        return this.value != null;
+    }
+
+    none(): boolean {
         return this.value == null;
     }
 }

@@ -30,7 +30,7 @@ export function repositionSlider(slider: Slider, position: number) {
     slider.scrubber.style.left = `${clamp(position * 100, 0, 100)}%`;
 }
 
-function createSlider(rootSelector: string): Result<Slider, string> {
+export function createSlider(rootSelector: string): Result<Slider, string> {
     const root = document.querySelector<HTMLDivElement>(rootSelector);
 
     if (!root) {
@@ -56,7 +56,7 @@ function createSlider(rootSelector: string): Result<Slider, string> {
     });
 }
 
-function addSliderHandlers(
+export function addSliderHandlers(
     slider: Slider,
     handlers: SliderHandlers
 ): Result<boolean, string> {
@@ -92,7 +92,7 @@ function createSlideHandler(slider: Slider): SlideHandler {
         repositionSlider(slider, position);
         slider.input.value = position.toFixed(0);
 
-        if (!callback.isEmpty()) {
+        if (!callback.none()) {
             callback.unwrap()(position);
         }
 

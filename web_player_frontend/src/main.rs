@@ -21,12 +21,14 @@ struct HomePage {
 struct PlayerComponent {
     state: PlayerStateComponent,
     gain: usize,
+    playback_state: Option<String>
 }
 
 #[derive(Template)]
 #[template(path = "player_state.html")]
 struct PlayerStateComponent {
     track_id: String,
+    hub_id: String,
 }
 
 #[derive(Template)]
@@ -47,12 +49,16 @@ struct TrackListComponent {
 #[derive(Template)]
 #[template(
     source = r##"
-    <div hx-trigger="click" hx-swap="innerHTML" hx-target="#player-component-state" hx-post="/change_track/{{ track_id }}">Track</div>
+    <div hx-trigger="click" hx-swap="innerHTML" hx-target="#player-component-state" 
+        hx-post="/change_track/{{hub_id}}/{{ track_id }}">
+        Track
+    </div>
     "##,
     ext = "html"
 )]
 struct TrackListElement {
     track_id: String,
+    hub_id: String,
 }
 
 #[tokio::main]
@@ -61,13 +67,16 @@ async fn main() {
         .nest_service("/assets", ServeDir::new("assets"))
         .nest_service("/vendors", ServeDir::new("vendors"))
         .route("/", axum::routing::get(render_home_page))
-        .route("/change_track/:track_id", axum::routing::post(change_track));
+        .route(
+            "/change_track/:hub_id/:track_id",
+            axum::routing::post(change_track),
+        );
     let listener = TcpListener::bind("0.0.0.0:8080").await.unwrap();
     axum::serve(listener, app).await.unwrap();
 }
 
 async fn render_home_page() -> impl IntoResponse {
-    let mut hub_client = HubClient::connect("http://localhost:8000")
+    let mut hub_client = HubClient::connect("http://0.0.0.0:8000")
         .await
         .expect("Should connect to hub");
     let track_list = hub_client
@@ -82,6 +91,7 @@ async fn render_home_page() -> impl IntoResponse {
         .iter()
         .map(|track| TrackListElement {
             track_id: track.track_id.clone(),
+            hub_id: track.hub_id.clone(),
         })
         .collect();
 
@@ -92,12 +102,13 @@ async fn render_home_page() -> impl IntoResponse {
         player: PlayerComponent {
             state: PlayerStateComponent {
                 track_id: String::new(),
+                hub_id: String::new(),
             },
             gain: 100,
         },
     }
 }
 
-async fn change_track(Path(track_id): Path<String>) -> impl IntoResponse {
-    PlayerStateComponent { track_id }
+async fn change_track(Path((hub_id, track_id)): Path<(String, String)>) -> impl IntoResponse {
+    PlayerStateComponent { track_id, hub_id }
 }

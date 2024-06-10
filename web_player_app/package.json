@@ -18,7 +18,6 @@
     "typescript": "^5.4.5"
   },
   "dependencies": {
-    "@protobuf-ts/grpc-transport": "^2.9.4",
     "@protobuf-ts/grpcweb-transport": "^2.9.4",
     "@protobuf-ts/plugin": "^2.9.4",
     "google-protobuf": "^3.21.2",

@@ -18,6 +18,14 @@ message GetTrackListResponse {
     repeated Track tracks = 1;
 }
 
+message GetTrackRequest {
+    string track_id = 1;
+}
+
+message GetTrackResponse {
+    Track track = 1;
+}
+
 message Track {
     string track_id = 1;
     string hub_id = 2;
@@ -27,4 +35,5 @@ message Track {
 service Hub {
     rpc StreamAudio(StreamAudioRequest) returns (stream StreamAudioResponse);
     rpc GetTrackList(GetTrackListRequest) returns (GetTrackListResponse);
+    rpc GetTrack(GetTrackRequest) returns (GetTrackResponse);
 }

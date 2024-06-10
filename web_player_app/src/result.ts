@@ -24,6 +24,10 @@ export class Result<T, E> {
         return this.value_;
     }
 
+    isError(): boolean {
+        return this.error_ != null && this.value_ == null;
+    }
+
     ok(): boolean {
         return this.error_ == null && this.value_ != null;
     }

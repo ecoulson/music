@@ -2,7 +2,8 @@ use std::{fs::File, io::Read};
 
 use hub::{
     hub_server::{Hub, HubServer},
-    GetTrackListRequest, GetTrackListResponse, StreamAudioRequest, StreamAudioResponse, Track,
+    GetTrackListRequest, GetTrackListResponse, GetTrackRequest, GetTrackResponse,
+    StreamAudioRequest, StreamAudioResponse, Track,
 };
 use r2d2::{ManageConnection, Pool, PooledConnection};
 use sqlite::Connection;
@@ -104,8 +105,21 @@ impl Hub for HubService {
             tracks: vec![Track {
                 track_id: String::from("0"),
                 hub_id: String::from("10.0.0.142:8000"),
-                duration_milliseconds: 472437
+                duration_milliseconds: 472437,
             }],
+        }))
+    }
+
+    async fn get_track(
+        &self,
+        _request: Request<GetTrackRequest>,
+    ) -> Result<Response<GetTrackResponse>, Status> {
+        Ok(Response::new(GetTrackResponse {
+            track: Some(Track {
+                track_id: String::from("0"),
+                hub_id: String::from("10.0.0.142:8000"),
+                duration_milliseconds: 472437,
+            }),
         }))
     }
 }

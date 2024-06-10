@@ -1,11 +1,11 @@
-<!doctype html>
-<html lang="en">
-  <head>
-    <link type="text/css" href="/assets/main.css" rel="stylesheet" />
-  </head>
-  <body>
-    {{ track_list|safe }} {{ player|safe }}
-    <script src="/vendors/htmx.min.js"></script>
-    <script src="/assets/web-player.js"></script>
-  </body>
-</html>
+{% extends "base.html" %}
+
+{% block meta %}
+<meta name="initial_track_id" content="{{ player_state.track_id }}" />
+<meta name="initial_hub_id" content="{{ player_state.hub_id }}" />
+{% endblock %}
+
+{% block content %}
+    {{ track_list|safe }} 
+    {% include "player.html" %}
+{% endblock %}

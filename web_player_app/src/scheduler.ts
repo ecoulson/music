@@ -36,10 +36,11 @@ function createPlaybackEvent(track: Track, offset: Duration): PlaybackEvent {
 export async function queueTrack(
     scheduler: Scheduler,
     audioOutput: AudioOutput,
-    track: Track
+    track: Track,
+    onSegment: Optional<() => void> // TODO: consider using an event emitter
 ): Promise<Result<Optional<PlaybackEvent>, DOMException>> {
     const trackOffset = Duration.fromMilliseconds(scheduler.events.reduce<number>(
-        (offset, event) => offset + event.track.durationMilliseconds, 0));
+        (offset, event) => offset + event.track.duration_milliseconds, 0));
     const playbackEvent = createPlaybackEvent(track, trackOffset);
     scheduler.events.push(playbackEvent);
 
@@ -49,10 +50,14 @@ export async function queueTrack(
     }
 
     const trackLoader = createAudioLoader(audioOutput, new HubClient(new GrpcWebFetchTransport({
-        baseUrl: `http://${track.hubId}`,
+        baseUrl: `http://${track.hub_id}`,
     })));
     const audio = await loadAudioForTrack(trackLoader, track, (segment) => {
         playAudioSegment(segment, trackOffset);
+
+        if (onSegment.some()) {
+            onSegment.unwrap()();
+        }
     });
 
     if (!audio.ok()) {

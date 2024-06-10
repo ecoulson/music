@@ -49,7 +49,7 @@ export function loadAudioForTrack(
     onSegmentLoaded: (segment: AudioSegment) => void
 ): Promise<Result<Audio, DOMException>> {
     const request = StreamAudioRequest.create({
-        trackId: track.trackId
+        track_id: track.track_id
     });
     const stream = loader.hubClient.streamAudio(request, {});
 
@@ -63,7 +63,7 @@ export function loadAudioForTrack(
         stream.responses.onMessage((response) => {
             decodingTasks.push(worker.decodeFrame(response.chunk).then((decodedAudio) => {
                 const audioBufferSource = loader.audio.context.createBufferSource();
-                const audioChunk = createMpegAudioChunk(response.chunkId, decodedAudio);
+                const audioChunk = createMpegAudioChunk(response.chunk_id, decodedAudio);
                 audioBufferSource.connect(loader.audio.gainNode);
 
                 if (audioChunk.chunkId == audioSegments.length) {
@@ -92,7 +92,7 @@ export function loadAudioForTrack(
                 duration.add(trackNode.duration), Duration.fromSeconds(0));
 
             resolve(Result.ok({
-                trackId: track.trackId,
+                trackId: track.track_id,
                 segments: audioSegments,
                 duration: trackDuration,
                 scheduledTimeRange: {

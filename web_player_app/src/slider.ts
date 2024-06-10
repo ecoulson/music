@@ -1,4 +1,4 @@
-import { mount } from "./dom";
+import { mount, querySelector } from "./dom";
 import { clamp } from "./math";
 import { Optional } from "./optional";
 import { Result } from "./result";
@@ -31,27 +31,27 @@ export function repositionSlider(slider: Slider, position: number) {
 }
 
 export function createSlider(rootSelector: string): Result<Slider, string> {
-    const root = document.querySelector<HTMLDivElement>(rootSelector);
+    const root = querySelector<HTMLDivElement>(document, rootSelector);
 
-    if (!root) {
+    if (root.none()) {
         return Result.error(`Couldn't find root with id ${rootSelector}`);
     }
 
-    const scrubber = root.querySelector<HTMLDivElement>(".scrubber");
-    const input = root.querySelector<HTMLInputElement>(".slider-input");
+    const scrubber = querySelector<HTMLDivElement>(root.unwrap(), ".scrubber");
+    const input = querySelector<HTMLInputElement>(root.unwrap(), ".slider-input");
 
-    if (!scrubber) {
+    if (scrubber.none()) {
         return Result.error("No scrubber found");
     }
 
-    if (!input) {
+    if (input.none()) {
         return Result.error("No input found");
     }
 
     return Result.ok({
-        root,
-        scrubber,
-        input,
+        root: root.unwrap(),
+        scrubber: scrubber.unwrap(),
+        input: input.unwrap(),
         isSliding: false
     });
 }

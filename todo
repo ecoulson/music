@@ -1,0 +1,5 @@
+### Tools
+
+1. Write a protobuf generator that generates webrpc compliant code using the result and optional
+classes
+2. Fork HTMX and support protobuf headers for trigger?

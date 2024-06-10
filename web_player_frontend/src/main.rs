@@ -1,9 +1,21 @@
+use std::{collections::HashMap, str::FromStr};
+
 use hub::{hub_client::HubClient, GetTrackListRequest};
+use player::PlayerState;
 use tokio::net::TcpListener;
 
 use askama_axum::Template;
-use axum::{extract::Path, response::IntoResponse, Router};
+use axum::{
+    extract::Path,
+    http::{HeaderMap, HeaderName, HeaderValue},
+    response::IntoResponse,
+    Router,
+};
 use tower_http::services::ServeDir;
+
+pub mod player {
+    tonic::include_proto!("player");
+}
 
 pub mod hub {
     tonic::include_proto!("hub");
@@ -13,22 +25,7 @@ pub mod hub {
 #[template(path = "home.html")]
 struct HomePage {
     track_list: TrackListComponent,
-    player: PlayerComponent,
-}
-
-#[derive(Template)]
-#[template(path = "player.html")]
-struct PlayerComponent {
-    state: PlayerStateComponent,
-    gain: usize,
-    playback_state: Option<String>
-}
-
-#[derive(Template)]
-#[template(path = "player_state.html")]
-struct PlayerStateComponent {
-    track_id: String,
-    hub_id: String,
+    player_state: PlayerState,
 }
 
 #[derive(Template)]
@@ -49,8 +46,7 @@ struct TrackListComponent {
 #[derive(Template)]
 #[template(
     source = r##"
-    <div hx-trigger="click" hx-swap="innerHTML" hx-target="#player-component-state" 
-        hx-post="/change_track/{{hub_id}}/{{ track_id }}">
+    <div hx-trigger="click" hx-post="/change_track/{{ hub_id }}/{{ track_id }}">
         Track
     </div>
     "##,
@@ -99,16 +95,32 @@ async fn render_home_page() -> impl IntoResponse {
         track_list: TrackListComponent {
             tracks: track_list_elements,
         },
-        player: PlayerComponent {
-            state: PlayerStateComponent {
-                track_id: String::new(),
-                hub_id: String::new(),
-            },
+        player_state: PlayerState {
+            track_id: String::new(),
+            hub_id: String::new(),
             gain: 100,
         },
     }
 }
 
 async fn change_track(Path((hub_id, track_id)): Path<(String, String)>) -> impl IntoResponse {
-    PlayerStateComponent { track_id, hub_id }
+    let mut headers = HeaderMap::new();
+    let events = HashMap::from([(
+        "player_state_change",
+        PlayerState {
+            hub_id,
+            track_id,
+            gain: 100,
+        },
+    )]);
+    headers.insert(
+        HeaderName::from_str("HX-Reswap").unwrap(),
+        HeaderValue::from_str("none").unwrap(),
+    );
+    headers.insert(
+        HeaderName::from_str("HX-Trigger").unwrap(),
+        HeaderValue::from_str(&serde_json::to_string(&events).unwrap()).unwrap(),
+    );
+
+    headers
 }

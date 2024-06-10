@@ -23,6 +23,14 @@ export class Optional<T> {
         return this.value;
     }
 
+    unwrap_or(other: T): T {
+        if (!this.value) {
+            return other;
+        }
+
+        return this.value;
+    }
+
     some(): boolean {
         return this.value != null;
     }

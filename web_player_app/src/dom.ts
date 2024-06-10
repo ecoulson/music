@@ -1,13 +1,10 @@
+import { Optional } from "./optional";
 import { Result } from "./result";
 
-export function expectElementWithId<T extends HTMLElement>(id: string): Result<T, string> {
-    const element = document.getElementById(id);
-
-    if (!element) {
-        return Result.error(`failed to retrieve element with id ${id}`);
+interface HtmxEvent<T> extends Event {
+    detail: T & {
+        elt: HTMLElement
     }
-
-    return Result.ok(element as T);
 }
 
 type ComponentConstructor<C> = (selector: string) => Result<C, string>;
@@ -29,3 +26,32 @@ export function mount<C, H>(
     }
 }
 
+export function addHtmxListener<T>(event: string, handler: (event: HtmxEvent<T>) => void) {
+    document.addEventListener(event, (event) => handler(event as HtmxEvent<T>));
+}
+
+export function querySelector<T extends HTMLElement>(
+    root: HTMLElement | Document,
+    selector: string
+): Optional<T> {
+    const element = root.querySelector<T>(selector);
+
+    if (!element) {
+        return Optional.empty();
+    }
+
+    return Optional.of(element);
+}
+
+export function querySelectorAll<T extends HTMLElement>(
+    root: HTMLElement | Document,
+    selector: string
+): Optional<NodeListOf<T>> {
+    const element = root.querySelectorAll<T>(selector);
+
+    if (!element) {
+        return Optional.empty();
+    }
+
+    return Optional.of(element);
+}

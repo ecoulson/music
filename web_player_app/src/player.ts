@@ -1,15 +1,18 @@
+import { GrpcWebFetchTransport } from "@protobuf-ts/grpcweb-transport";
 import { Track } from "../generated/hub";
-import { mount } from "./dom";
+import { HubClient } from "../generated/hub.client";
+import { addHtmxListener, mount, querySelector } from "./dom";
 import { Optional } from "./optional";
 import { Result } from "./result";
 import { Scheduler, createScheduler, queueTrack } from "./scheduler";
 import { Slider, addSliderHandlers, createSlider, mountSlider, repositionSlider } from "./slider";
 import { Duration, Time } from "./time";
+import { PlayerState } from "../generated/player";
 
 type AudioStateChangeHandler = (state: PlaybackState) => void;
 
 enum PlaybackState {
-    Unknown,
+    Initialized,
     Paused,
     Playing,
     Loading,
@@ -27,9 +30,14 @@ export interface Player {
     audioOutput: AudioOutput;
     volumeSlider: Slider;
     playbackSlider: Slider;
-    playbackController: HTMLButtonElement;
+    playButton: HTMLButtonElement;
     scheduler: Scheduler;
     currentTrackPlayback: Optional<TrackPlayback>
+}
+
+interface TrackKey {
+    trackId: string,
+    hubId: string
 }
 
 interface TrackPlayback {
@@ -63,18 +71,25 @@ export function mountPlayer(selector: string, handlers: PlayerHandlers): Result<
 }
 
 function createPlayer(rootSelector: string): Result<Player, string> {
-    const root = document.querySelector(rootSelector);
+    const root = querySelector(document, rootSelector);
 
-    if (!root) {
+    if (root.none()) {
         return Result.error("Root not found");
     }
 
-    const playbackController = root.querySelector<HTMLButtonElement>("#playback-state");
+    const playButton = querySelector<HTMLButtonElement>(root.unwrap(), "#play-button");
 
-    if (!playbackController) {
+    if (playButton.none()) {
         return Result.error("Failed to find playback controller input");
     }
 
+    const currentTrackKeyResult = createTrackKey();
+
+    if (currentTrackKeyResult.isError()) {
+        return Result.error(currentTrackKeyResult.error());
+    }
+
+    const currentTrackKey = currentTrackKeyResult.unwrap();
     const audioOutput = createAudioOutput();
     const playbackSlider = createSlider("#playback-scrubber");
     const volumeSlider = mountSlider("#volume-control", {
@@ -83,19 +98,51 @@ function createPlayer(rootSelector: string): Result<Player, string> {
         onSlide: Optional.of((volume) => setVolume(audioOutput, volume)),
     }).unwrap();
 
+    // load current track playback
+    const currentTrackPlayback = Optional.empty();
+
+    if (currentTrackKey.some()) {
+        console.log(currentTrackKey);
+    }
+
     if (!playbackSlider.ok()) {
         return Result.error(playbackSlider.error());
     }
 
     return Result.ok({
-        playbackState: PlaybackState.Unknown,
+        playbackState: PlaybackState.Initialized,
         audioOutput,
-        playbackController,
+        playButton: playButton.unwrap(),
         playbackSlider: playbackSlider.unwrap(),
         volumeSlider,
         scheduler: createScheduler(/*buffer_size=*/5),
-        currentTrackPlayback: Optional.empty()
+        currentTrackPlayback,
     });
+}
+
+function createTrackKey(): Result<Optional<TrackKey>, string> {
+    let initialTrackIdResult = querySelector<HTMLMetaElement>(document.head, "meta[name='initial_track_id']");
+    let initialHubIdResult = querySelector<HTMLMetaElement>(document.head, "meta[name='initial_hub_id']");
+
+    if (initialTrackIdResult.none()) {
+        return Result.error("Failed to get track id");
+    }
+
+    if (initialHubIdResult.none()) {
+        return Result.error("Failed to get track hub id");
+    }
+
+    let initialTrackId = initialTrackIdResult.unwrap();
+    let initialHubId = initialHubIdResult.unwrap();
+
+    if (initialTrackId.content.length === 0 && initialHubId.content.length === 0) {
+        return Result.ok(Optional.empty());
+    }
+
+    return Result.ok(Optional.of({
+        trackId: initialTrackId.content,
+        hubId: initialHubId.content
+    }));
 }
 
 function addPlayerHandlers(player: Player, handlers: PlayerHandlers): Result<boolean, string> {
@@ -105,7 +152,7 @@ function addPlayerHandlers(player: Player, handlers: PlayerHandlers): Result<boo
         onSlideEnd: Optional.empty()
     }).unwrap();
 
-    player.playbackController.addEventListener("click", () => handlePlaybackState(player));
+    player.playButton.addEventListener("click", () => handlePlaybackState(player));
     player.audioOutput.context.addEventListener("statechange", () => {
         switch (player.audioOutput.context.state) {
             case "running":
@@ -127,91 +174,119 @@ function addPlayerHandlers(player: Player, handlers: PlayerHandlers): Result<boo
         }
     });
 
+    addHtmxListener<PlayerState>("player_state_change", (event) => {
+        if (event.detail.hub_id.length == 0 && event.detail.track_id.length == 0) {
+            return;
+        }
+
+        player.playButton.disabled = false;
+        // queue here?
+    });
+
     return Result.ok(true);
+}
+
+async function playTrack(player: Player) {
+    player.playButton.textContent = "Pause";
+    player.playbackState = PlaybackState.Loading;
+    const trackPlayback = player.currentTrackPlayback.unwrap();
+    const hubClient = new HubClient(new GrpcWebFetchTransport({
+        baseUrl: `http://${trackPlayback.track.hub_id}`
+    }));
+    const trackResponse = await hubClient.getTrack({
+        track_id: trackPlayback.track.track_id
+    });
+
+    if (!trackResponse.response.track) {
+        console.error("No track loaded");
+        player.playbackState = PlaybackState.Error;
+        return;
+    }
+
+    const track = trackResponse.response.track;
+    const event = await queueTrack(player.scheduler, player.audioOutput, track, Optional.of(() => {
+        if (player.currentTrackPlayback.some()) {
+            return;
+        }
+
+        player.currentTrackPlayback = Optional.of(
+            createTrackPlayback(track, startAudioPlaybackMonitoring(player)));
+    }));
+
+    if (event.isError()) {
+        console.error("Failed to queue track", event.error());
+        player.playbackState = PlaybackState.Error;
+        return;
+    }
 }
 
 function tooglePlaybackController(player: Player, state: PlaybackState) {
     switch (state) {
         case PlaybackState.Playing:
         case PlaybackState.Loading:
-            player.playbackController.innerText = "Pause";
+            player.playButton.innerText = "Pause";
             break;
         case PlaybackState.Complete:
         case PlaybackState.Paused:
-            player.playbackController.innerText = "Play";
+            player.playButton.innerText = "Play";
             break;
         case PlaybackState.Error:
-            player.playbackController.innerText = "Error";
+            player.playButton.innerText = "Error";
             break;
         default:
             break;
     }
 }
 
-function handlePlaybackState(player: Player) {
-    const stateElement = document.getElementById("playback-state");
-    const trackIdInput: HTMLInputElement = document.getElementById("playback-track-id") as HTMLInputElement;
-    const trackHubIdInput: HTMLInputElement = document.getElementById("playback-hub-id") as HTMLInputElement;
-
-    if (!stateElement) {
-        console.error("Failed to get playback state component");
-        return;
-    }
-
-    if (!trackIdInput) {
-        console.error("Failed to get track id");
-        return;
-    }
-
-    if (!trackHubIdInput) {
-        console.error("Failed to get track hub id");
+async function handlePlaybackState(player: Player) {
+    if (player.currentTrackPlayback.none()) {
+        console.error("Song not selected");
+        player.playbackState = PlaybackState.Error;
         return;
     }
 
     switch (player.playbackState) {
         case PlaybackState.Paused:
+            player.playButton.textContent = "Play";
             play(player.audioOutput);
             break;
         case PlaybackState.Playing:
+            player.playButton.textContent = "Pause";
             pause(player.audioOutput);
             break;
-        case PlaybackState.Unknown:
-            stateElement.textContent = "Pause";
+        case PlaybackState.Initialized:
+            player.playButton.textContent = "Pause";
             player.playbackState = PlaybackState.Loading;
-            // Fetch track instead
-            const track = Track.create({
-                trackId: trackIdInput.value,
-                hubId: trackHubIdInput.value,
-                durationMilliseconds: 472436.9841269841
+            const trackPlayback = player.currentTrackPlayback.unwrap();
+            const hubClient = new HubClient(new GrpcWebFetchTransport({
+                baseUrl: `http://${trackPlayback.track.hub_id}`
+            }));
+            const trackResponse = await hubClient.getTrack({
+                track_id: trackPlayback.track.track_id
             });
-            queueTrack(player.scheduler, player.audioOutput, track).then((event) => {
-                if (!event.ok()) {
-                    console.error("Failed to queue track", event.error());
-                    player.playbackState = PlaybackState.Error;
+
+            if (!trackResponse.response.track) {
+                console.error("No track loaded");
+                player.playbackState = PlaybackState.Error;
+                return;
+            }
+
+            const track = trackResponse.response.track;
+            const event = await queueTrack(player.scheduler, player.audioOutput, track, Optional.of(() => {
+                if (player.currentTrackPlayback.some()) {
                     return;
                 }
 
-                if (event.unwrap().none()) {
-                    console.error("Lazy loading track");
-                    player.playbackState = PlaybackState.Error;
-                    return;
-                }
+                player.currentTrackPlayback = Optional.of(
+                    createTrackPlayback(track, startAudioPlaybackMonitoring(player)));
+            }));
 
-                console.log(player);
-                if (player.currentTrackPlayback.none()) {
-                    console.error("No playback set");
-                    player.playbackState = PlaybackState.Error;
-                    return;
-                }
+            if (event.isError()) {
+                console.error("Failed to queue track", event.error());
+                player.playbackState = PlaybackState.Error;
+                return;
+            }
 
-                const currentTrackPlayback = player.currentTrackPlayback.unwrap();
-                const queuedTrack = event.unwrap().unwrap().track;
-
-                if (currentTrackPlayback.track.trackId === queuedTrack.trackId) {
-                    player.currentTrackPlayback = Optional.of(
-                        createTrackPlayback(track, startAudioPlaybackMonitoring(player)));
-                }
-            });
             break;
         case PlaybackState.Loading:
             break;
@@ -299,7 +374,7 @@ function createTrackPlayback(track: Track, intervalId: number): TrackPlayback {
         track,
         intervalId,
         position: Time.fromUnixSeconds(0),
-        duration: Duration.fromMilliseconds(track.durationMilliseconds)
+        duration: Duration.fromMilliseconds(track.duration_milliseconds)
     }
 }
 

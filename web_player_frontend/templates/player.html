@@ -1,5 +1,4 @@
 <div id="player-component">
-    {{ state|safe }}
     <div class="h-4 bg-gray-300 relative" id="playback-scrubber">
         <input hidden class="slider-input" />
         <div id="playback-scrubber-control" class="scrubber h-4 rounded-full w-4 bg-gray-500 absolute"
@@ -7,10 +6,10 @@
         </div>
     </div>
     <div class="h-4 w-64 bg-gray-300 relative" id="volume-control">
-        <input value="{{ gain }}" hidden class="slider-input" />
+        <input value="{{ player_state.gain }}" hidden class="slider-input" />
         <div class="scrubber h-4 rounded-full w-4 bg-gray-500 absolute transform" 
-            style="transform: translate(-50%); left: {{ gain }}%;"
+            style="transform: translate(-50%); left: {{ player_state.gain }}%;"
             class="scrubber"></div>
     </div>
-    <button id="playback-state">Play</button>
+    <button disabled id="play-button">Play</button>
 </div>

@@ -25,7 +25,7 @@ export class Result<T, E> {
     }
 
     isError(): boolean {
-        return this.error_ != null && this.value_ == null;
+        return this.error_ != null;
     }
 
     ok(): boolean {

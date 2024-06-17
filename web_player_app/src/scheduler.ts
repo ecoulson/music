@@ -1,58 +1,100 @@
-import { HubClient } from "../generated/hub.client";
 import { Track } from "../generated/hub";
-import { Audio, createAudioLoader, loadAudioForTrack, playAudioSegment } from "./audio";
+import { AudioLoader, AudioSegment, cancelAudioLoad, loadAudioForTrack, playAudioSegment } from "./audio";
 import { Optional } from "./optional";
 import { AudioOutput } from "./player";
 import { Result } from "./result";
-import { Duration, Time } from "./time";
-import { GrpcWebFetchTransport } from "@protobuf-ts/grpcweb-transport";
+import { Duration } from "./time";
+import { Status } from "grpc-web";
 
 export interface Scheduler {
-    events: PlaybackEvent[];
-    bufferSize: number;
-    bufferedTracks: Audio[];
+    audioLoader: AudioLoader;
+    bufferedTracks: PlaybackEvent[];
+    schedule: Track[];
+    currentTrackIndex: number;
+    bufferTrackSize: number;
 }
 
-interface PlaybackEvent {
+export interface PlaybackEvent {
     track: Track,
     offset: Duration
+    segments: AudioSegment[],
 }
 
-export function createScheduler(bufferTrackSize: number): Scheduler {
+export function createScheduler(audioLoader: AudioLoader, bufferTrackSize: number): Scheduler {
     return {
-        bufferSize: bufferTrackSize,
-        events: [],
-        bufferedTracks: []
+        audioLoader,
+        bufferTrackSize,
+        bufferedTracks: [],
+        schedule: [],
+        currentTrackIndex: 0
     }
 }
 
 function createPlaybackEvent(track: Track, offset: Duration): PlaybackEvent {
     return {
         track,
-        offset
+        offset,
+        segments: []
     };
+}
+
+export function cancelLoad(scheduler: Scheduler, track: Track) {
+    cancelAudioLoad(scheduler.audioLoader, track);
+}
+
+export async function swapTrack(
+    scheduler: Scheduler,
+    track: Track,
+    onSegment: Optional<() => void>
+): Promise<Result<Optional<PlaybackEvent>, Status>> {
+    const trackOffset = Duration.fromMilliseconds(
+        scheduler.bufferedTracks.slice(0, scheduler.currentTrackIndex).reduce<number>(
+            (offset, event) => offset + event.track.duration_milliseconds, 0));
+    const playbackEvent = createPlaybackEvent(track, trackOffset);
+
+    if (scheduler.schedule.length == 0) {
+        scheduler.schedule.push(track);
+        scheduler.bufferedTracks.push(playbackEvent);
+    } else {
+        clearScheduledAudio(scheduler);
+        scheduler.schedule[scheduler.currentTrackIndex] = track;
+        scheduler.bufferedTracks[scheduler.currentTrackIndex] = playbackEvent;
+    }
+
+    const audio = await loadAudioForTrack(scheduler.audioLoader, track, (segment) => {
+        console.log(segment);
+        playbackEvent.segments.push(segment);
+        playAudioSegment(segment, trackOffset);
+
+        if (onSegment.some()) {
+            onSegment.unwrap()();
+        }
+    });
+
+    if (!audio.ok()) {
+        return Result.error(audio.error())
+    }
+
+    return Result.ok(Optional.of(playbackEvent));
 }
 
 export async function queueTrack(
     scheduler: Scheduler,
-    audioOutput: AudioOutput,
     track: Track,
-    onSegment: Optional<() => void> // TODO: consider using an event emitter
-): Promise<Result<Optional<PlaybackEvent>, DOMException>> {
-    const trackOffset = Duration.fromMilliseconds(scheduler.events.reduce<number>(
+    onSegment: Optional<() => void>
+): Promise<Result<Optional<PlaybackEvent>, Status>> {
+    const trackOffset = Duration.fromMilliseconds(scheduler.bufferedTracks.reduce<number>(
         (offset, event) => offset + event.track.duration_milliseconds, 0));
     const playbackEvent = createPlaybackEvent(track, trackOffset);
-    scheduler.events.push(playbackEvent);
+    scheduler.schedule.push(track);
 
-    if (scheduler.bufferedTracks.length == scheduler.bufferSize) {
+    if (scheduler.bufferedTracks.length == scheduler.bufferTrackSize) {
         console.log("lazy load this track");
         return Result.ok(Optional.empty());
     }
 
-    const trackLoader = createAudioLoader(audioOutput, new HubClient(new GrpcWebFetchTransport({
-        baseUrl: `http://${track.hub_id}`,
-    })));
-    const audio = await loadAudioForTrack(trackLoader, track, (segment) => {
+    const audio = await loadAudioForTrack(scheduler.audioLoader, track, (segment) => {
+        playbackEvent.segments.push(segment);
         playAudioSegment(segment, trackOffset);
 
         if (onSegment.some()) {
@@ -68,8 +110,21 @@ export async function queueTrack(
 }
 
 
-export function clearScheduledAudio(scheduler: Scheduler, audio: AudioOutput) {
+export function clearScheduledAudio(scheduler: Scheduler) {
+    for (const event of scheduler.bufferedTracks) {
+        for (const segment of event.segments) {
+            segment.audioBufferSource.stop(0);
+        }
+    }
 }
 
-export function adjustSchedule(scheduler: Scheduler, audio: AudioOutput, offset: Time) {
+export function skipTrack(scheduler: Scheduler, audio: AudioOutput) {
+}
+
+export function adjustSchedule(scheduler: Scheduler, offset: Duration) {
+    if (scheduler.bufferedTracks.length == 0) {
+        return;
+    }
+
+    clearScheduledAudio(scheduler);
 }

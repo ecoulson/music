@@ -4,10 +4,12 @@ import { HubClient } from "../generated/hub.client";
 import { addHtmxListener, mount, querySelector } from "./dom";
 import { Optional } from "./optional";
 import { Result } from "./result";
-import { Scheduler, createScheduler, queueTrack } from "./scheduler";
+import { PlaybackEvent, Scheduler, cancelLoad, clearScheduledAudio, createScheduler, queueTrack, swapTrack } from "./scheduler";
 import { Slider, addSliderHandlers, createSlider, mountSlider, repositionSlider } from "./slider";
 import { Duration, Time } from "./time";
 import { PlayerState } from "../generated/player";
+import { createAudioLoader } from "./audio";
+import { Status, StatusCode } from "grpc-web";
 
 type AudioStateChangeHandler = (state: PlaybackState) => void;
 
@@ -44,7 +46,7 @@ interface TrackPlayback {
     position: Time;
     duration: Duration;
     track: Track;
-    intervalId: number;
+    intervalId: Optional<number>;
 }
 
 interface PlayerHandlers {
@@ -98,10 +100,10 @@ function createPlayer(rootSelector: string): Result<Player, string> {
         onSlide: Optional.of((volume) => setVolume(audioOutput, volume)),
     }).unwrap();
 
-    // load current track playback
     const currentTrackPlayback = Optional.empty();
 
     if (currentTrackKey.some()) {
+        // load current track playback
         console.log(currentTrackKey);
     }
 
@@ -115,7 +117,7 @@ function createPlayer(rootSelector: string): Result<Player, string> {
         playButton: playButton.unwrap(),
         playbackSlider: playbackSlider.unwrap(),
         volumeSlider,
-        scheduler: createScheduler(/*buffer_size=*/5),
+        scheduler: createScheduler(createAudioLoader(audioOutput), /*buffer_size=*/5),
         currentTrackPlayback,
     });
 }
@@ -174,50 +176,92 @@ function addPlayerHandlers(player: Player, handlers: PlayerHandlers): Result<boo
         }
     });
 
-    addHtmxListener<PlayerState>("player_state_change", (event) => {
+
+    addHtmxListener<PlayerState>("player_state_change", async (event) => {
         if (event.detail.hub_id.length == 0 && event.detail.track_id.length == 0) {
             return;
         }
 
-        player.playButton.disabled = false;
-        // queue here?
+        const track = await fetchTrack(event.detail.track_id, event.detail.hub_id);
+
+        if (track.isError()) {
+            console.error(track.error());
+            player.playbackState = PlaybackState.Error;
+            return;
+        }
+
+        // BUG: Stacks tracks on top of each other
+        // Need to check for if it is loading and ability to cancel the current promise
+        if (player.playbackState === PlaybackState.Playing) {
+            repositionSlider(player.playbackSlider, 0);
+        }
+
+        if (player.playButton.disabled) {
+            player.playButton.disabled = false;
+        }
+
+        playTrack(player, track.unwrap());
     });
 
     return Result.ok(true);
 }
 
-async function playTrack(player: Player) {
-    player.playButton.textContent = "Pause";
-    player.playbackState = PlaybackState.Loading;
-    const trackPlayback = player.currentTrackPlayback.unwrap();
+async function fetchTrack(trackId: string, hubId: string): Promise<Result<Track, string>> {
     const hubClient = new HubClient(new GrpcWebFetchTransport({
-        baseUrl: `http://${trackPlayback.track.hub_id}`
+        baseUrl: `http://${hubId}`
     }));
     const trackResponse = await hubClient.getTrack({
-        track_id: trackPlayback.track.track_id
+        track_id: trackId
     });
 
     if (!trackResponse.response.track) {
-        console.error("No track loaded");
-        player.playbackState = PlaybackState.Error;
-        return;
+        return Result.error("Track not found");
     }
 
-    const track = trackResponse.response.track;
-    const event = await queueTrack(player.scheduler, player.audioOutput, track, Optional.of(() => {
-        if (player.currentTrackPlayback.some()) {
+    return Result.ok(trackResponse.response.track);
+}
+
+async function playTrack(player: Player, track: Track): Promise<Result<PlaybackEvent, Status>> {
+    player.playButton.textContent = "Pause";
+    player.playbackState = PlaybackState.Loading;
+
+    if (player.currentTrackPlayback.some()) {
+        cancelLoad(player.scheduler, player.currentTrackPlayback.unwrap().track);
+    }
+
+    if (player.currentTrackPlayback.some() && player.currentTrackPlayback.unwrap().intervalId.some()) {
+        clearInterval(player.currentTrackPlayback.unwrap().intervalId.unwrap());
+    }
+
+    player.currentTrackPlayback = Optional.of(createTrackPlayback(track));
+
+    console.log("play", new Date());
+    const event = await swapTrack(player.scheduler, track, Optional.of(() => {
+        player.playbackState = PlaybackState.Playing;
+
+        if (player.currentTrackPlayback.unwrap().intervalId.some()) {
             return;
         }
 
-        player.currentTrackPlayback = Optional.of(
-            createTrackPlayback(track, startAudioPlaybackMonitoring(player)));
+        player.currentTrackPlayback.unwrap().intervalId = Optional.of(
+            startAudioPlaybackMonitoring(player));
     }));
 
+
     if (event.isError()) {
-        console.error("Failed to queue track", event.error());
         player.playbackState = PlaybackState.Error;
-        return;
+        return Result.error(event.error());
     }
+
+    if (event.unwrap().none()) {
+        player.playbackState = PlaybackState.Error;
+        return Result.error({
+            code: StatusCode.RESOURCE_EXHAUSTED,
+            details: "Buffer is full"
+        });
+    }
+
+    return Result.ok(event.unwrap().unwrap());
 }
 
 function tooglePlaybackController(player: Player, state: PlaybackState) {
@@ -272,13 +316,14 @@ async function handlePlaybackState(player: Player) {
             }
 
             const track = trackResponse.response.track;
-            const event = await queueTrack(player.scheduler, player.audioOutput, track, Optional.of(() => {
+            const event = await queueTrack(player.scheduler, track, Optional.of(() => {
                 if (player.currentTrackPlayback.some()) {
                     return;
                 }
 
+                console.log("This is probably incorrect");
                 player.currentTrackPlayback = Optional.of(
-                    createTrackPlayback(track, startAudioPlaybackMonitoring(player)));
+                    createTrackPlayback(track, Optional.of(startAudioPlaybackMonitoring(player))));
             }));
 
             if (event.isError()) {
@@ -304,21 +349,9 @@ function play(audioOutput: AudioOutput): void {
     audioOutput.context.resume();
 }
 
-function getOutputCurrentTimeMs(output: AudioOutput): Result<Time, string> {
-    let currentTimeSeconds = output.context.getOutputTimestamp().contextTime;
-
-    if (typeof currentTimeSeconds === "undefined") {
-        return Result.error("Couldn't get current time");
-    }
-
-    return Result.ok(Time.fromUnixSeconds(currentTimeSeconds));
-}
-
 function handlePlaybackTick(player: Player, trackPlayback: TrackPlayback): PlaybackState {
-    let currentTime = getOutputCurrentTimeMs(player.audioOutput);
-
-    if (!currentTime.ok()) {
-        console.error("Couldn't retreive context time");
+    if (player.currentTrackPlayback.none()) {
+        console.error("No current playback");
         return PlaybackState.Loading;
     }
 
@@ -326,7 +359,7 @@ function handlePlaybackTick(player: Player, trackPlayback: TrackPlayback): Playb
         return player.playbackState;
     }
 
-    let progress = currentTime.unwrap().milliseconds() /
+    let progress = player.currentTrackPlayback.unwrap().position.milliseconds() /
         trackPlayback.duration.milliseconds()
 
     if (isNaN(progress) || !isFinite(progress)) {
@@ -354,10 +387,14 @@ function startAudioPlaybackMonitoring(player: Player): number {
         }
 
         const currentTrackPlayback = player.currentTrackPlayback.unwrap();
-        currentTrackPlayback.position.add(Time.fromUnixMilliseconds(100));
+        currentTrackPlayback.position =
+            currentTrackPlayback.position.add(Time.fromUnixMilliseconds(100));
 
         switch (handlePlaybackTick(player, currentTrackPlayback)) {
             case PlaybackState.Error:
+                console.error("Failed to handle tick");
+                clearInterval(intervalId);
+                break;
             case PlaybackState.Complete:
                 clearInterval(intervalId);
                 break;
@@ -369,7 +406,8 @@ function startAudioPlaybackMonitoring(player: Player): number {
     return intervalId;
 }
 
-function createTrackPlayback(track: Track, intervalId: number): TrackPlayback {
+
+function createTrackPlayback(track: Track, intervalId: Optional<number> = Optional.empty()): TrackPlayback {
     return {
         track,
         intervalId,
@@ -378,8 +416,7 @@ function createTrackPlayback(track: Track, intervalId: number): TrackPlayback {
     }
 }
 
+
 function handlePlaybackSlide(player: Player, value: number) {
-    const offset = Time.fromUnixMilliseconds(
-        player.scheduler.bufferedTracks[0].duration.milliseconds() * value);
-    console.log(offset);
+    console.log(player, value);
 }

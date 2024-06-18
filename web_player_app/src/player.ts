@@ -235,7 +235,6 @@ async function playTrack(player: Player, track: Track): Promise<Result<PlaybackE
 
     player.currentTrackPlayback = Optional.of(createTrackPlayback(track));
 
-    console.log("play", new Date());
     const event = await swapTrack(player.scheduler, track, Optional.of(() => {
         player.playbackState = PlaybackState.Playing;
 

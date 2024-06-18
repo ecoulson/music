@@ -17,6 +17,7 @@ export interface Audio {
 
 export interface AudioSegment {
     frameId: number;
+    contextTime: Time,
     audioBufferSource: AudioBufferSourceNode;
     scheduledTime: Time;
     duration: Duration;
@@ -51,6 +52,13 @@ interface ErrorEvent {
     error: Status
 }
 
+interface LoadContext {
+    idleFrames: AudioFrame[],
+    audioSegments: AudioSegment[],
+    onSegment: (segment: AudioSegment) => void,
+    abortSignal: AbortSignal
+}
+
 class AudioLoaderEmitter {
     emitter: Emitter<{
         cancel: CancelEvent,
@@ -62,12 +70,17 @@ class AudioLoaderEmitter {
         this.emitter = new Emitter();
     }
 
-    onCancel(trackId: string, handler: (event: CancelEvent) => void) {
+    onCancel(
+        trackId: string,
+        abortController: AbortController,
+        handler: (event: CancelEvent) => void
+    ) {
         this.emitter.on("cancel", (event) => {
             if (trackId !== event.canceledTrack.track_id) {
                 return;
             }
 
+            abortController.abort();
             handler(event);
         });
     }
@@ -82,12 +95,17 @@ class AudioLoaderEmitter {
         });
     }
 
-    onError(trackId: string, handler: (event: ErrorEvent) => void) {
+    onError(
+        trackId: string,
+        abortController: AbortController,
+        handler: (event: ErrorEvent) => void
+    ) {
         this.emitter.on("error", (event) => {
             if (event.trackId !== trackId) {
                 return;
             }
 
+            abortController.abort();
             handler(event);
         });
     }
@@ -128,6 +146,8 @@ export function cancelAudioLoad(audioLoader: AudioLoader, track: Track) {
     audioLoader.emitter.emitCancel(track);
 }
 
+// TODO: It could make more sense to return the load context and have it hold a promise of
+// audio segments
 export function loadAudioForTrack(
     audioLoader: AudioLoader,
     track: Track,
@@ -135,35 +155,21 @@ export function loadAudioForTrack(
 ): Promise<Result<Audio, Status>> {
     return new Promise(async (resolve) => {
         const abortController = new AbortController();
-        const audioSegments: AudioSegment[] = [];
-        const trackDuration = Duration.fromMilliseconds(track.duration_milliseconds);
-        let idleFrames: AudioFrame[] = [];
+        const loadContext = createLoadContext(onSegment, abortController);
 
-        // TODO(MEMORY LEAK): Need to clean up these listeners at somepoint otherwise we leak memory
-        // essentially
-        audioLoader.emitter.onError(track.track_id, (event) => {
-            abortController.abort();
-
-            for (const segment of audioSegments) {
-                segment.audioBufferSource.disconnect();
-            }
-
+        // TODO(MEMORY LEAK): Need to clean up these listeners at somepoint otherwise we will 
+        // overflow memory
+        audioLoader.emitter.onError(track.track_id, abortController, (event) => {
             return resolve(Result.error(event.error));
         });
-        audioLoader.emitter.onCancel(track.track_id, () => {
-            abortController.abort();
-
-            for (const segment of audioSegments) {
-                segment.audioBufferSource.disconnect();
-            }
-
+        audioLoader.emitter.onCancel(track.track_id, abortController, () => {
             return resolve(Result.error({
                 code: StatusCode.CANCELLED,
                 details: "Audio load canceled"
             }))
         });
-        audioLoader.emitter.onFrame(track.track_id, (event) => handleFrame(
-            audioLoader, event, idleFrames, audioSegments, onSegment, abortController.signal));
+        audioLoader.emitter.onFrame(track.track_id, (event) =>
+            handleFrameInContext(audioLoader, event, loadContext));
 
         const decodingTasks = await requestAudioFrames(audioLoader, track, abortController.signal);
 
@@ -171,11 +177,13 @@ export function loadAudioForTrack(
             return resolve(Result.error(decodingTasks.error()));
         }
 
+        // this could return audio segments?
         await Promise.all(decodingTasks.value());
+        const trackDuration = Duration.fromMilliseconds(track.duration_milliseconds);
 
         return resolve(Result.ok({
             trackId: track.track_id,
-            segments: audioSegments,
+            segments: loadContext.audioSegments,
             duration: trackDuration,
             scheduledTimeRange: {
                 start: Time.fromUnixSeconds(0),
@@ -185,35 +193,44 @@ export function loadAudioForTrack(
     });
 }
 
-function handleFrame(
+function createLoadContext(
+    onSegment: (segment: AudioSegment) => void,
+    abortController: AbortController
+): LoadContext {
+    return {
+        onSegment,
+        abortSignal: abortController.signal,
+        idleFrames: [],
+        audioSegments: [],
+    }
+}
+
+function handleFrameInContext(
     audioLoader: AudioLoader,
     event: FrameEvent,
-    idleFrames: AudioFrame[],
-    audioSegments: AudioSegment[],
-    onSegment: (segment: AudioSegment) => void,
-    abortSignal: AbortSignal
+    loadContext: LoadContext
 ) {
-    if (abortSignal.aborted) {
+    if (loadContext.abortSignal.aborted) {
         return;
     }
 
-    if (event.frame.frameId == audioSegments.length) {
-        const segment = createAudioSegment(audioLoader.audio, event.frame, audioSegments);
-        onSegment(segment);
-        audioSegments.push(segment);
+    if (event.frame.frameId == loadContext.audioSegments.length) {
+        const segment = createAudioSegment(audioLoader.audio, event.frame, loadContext);
+        loadContext.onSegment(segment);
+        loadContext.audioSegments.push(segment);
         return;
     }
 
-    idleFrames = insertIdleFrame(event.frame, idleFrames);
+    loadContext.idleFrames = insertIdleFrame(event.frame, loadContext.idleFrames);
 
-    while (idleFrames.length > 0 && idleFrames[0].frameId == audioSegments.length) {
+    while (loadContext.idleFrames.length > 0 && loadContext.idleFrames[0].frameId == loadContext.audioSegments.length) {
         const segment = createAudioSegment(
             audioLoader.audio,
-            idleFrames.shift()!,
-            audioSegments
+            loadContext.idleFrames.shift()!,
+            loadContext
         );
-        onSegment(segment);
-        audioSegments.push(segment);
+        loadContext.onSegment(segment);
+        loadContext.audioSegments.push(segment);
     }
 }
 
@@ -343,12 +360,12 @@ function insertIdleFrame(audioFrame: AudioFrame, idleFrames: AudioFrame[]): Audi
 function createAudioSegment(
     audioOutput: AudioOutput,
     audioFrame: AudioFrame,
-    trackNodes: AudioSegment[]
+    loadContext: LoadContext
 ): AudioSegment {
     let scheduledTimeSeconds = 0;
 
-    if (trackNodes.length > 0) {
-        let previousTrackNode = trackNodes[trackNodes.length - 1];
+    if (loadContext.audioSegments.length > 0) {
+        let previousTrackNode = loadContext.audioSegments[loadContext.audioSegments.length - 1];
         scheduledTimeSeconds = previousTrackNode.duration.seconds()
             + previousTrackNode.scheduledTime.seconds();
     }
@@ -356,10 +373,9 @@ function createAudioSegment(
     const audioBufferSource = audioOutput.context.createBufferSource();
     audioBufferSource.connect(audioOutput.gainNode);
     audioBufferSource.buffer = audioFrame.buffer;
-    let now = new Date();
-    audioBufferSource.addEventListener("ended", () => console.log(audioFrame.frameId, now.getTime()))
 
     return {
+        contextTime: Time.fromUnixSeconds(audioOutput.context.currentTime),
         frameId: audioFrame.frameId,
         audioBufferSource,
         duration: Duration.fromSeconds(audioFrame.buffer.duration),

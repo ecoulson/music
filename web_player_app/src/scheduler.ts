@@ -3,7 +3,7 @@ import { AudioLoader, AudioSegment, cancelAudioLoad, loadAudioForTrack, playAudi
 import { Optional } from "./optional";
 import { AudioOutput } from "./player";
 import { Result } from "./result";
-import { Duration } from "./time";
+import { Duration, Time } from "./time";
 import { Status } from "grpc-web";
 
 export interface Scheduler {
@@ -62,9 +62,9 @@ export async function swapTrack(
     }
 
     const audio = await loadAudioForTrack(scheduler.audioLoader, track, (segment) => {
-        console.log(segment);
         playbackEvent.segments.push(segment);
-        playAudioSegment(segment, trackOffset);
+        const contextOffset = Duration.fromSeconds(playbackEvent.segments[0].contextTime.seconds());
+        playAudioSegment(segment, trackOffset.add(contextOffset));
 
         if (onSegment.some()) {
             onSegment.unwrap()();
@@ -72,6 +72,10 @@ export async function swapTrack(
     });
 
     if (!audio.ok()) {
+        for (const segment of playbackEvent.segments) {
+            segment.audioBufferSource.disconnect();
+        }
+
         return Result.error(audio.error())
     }
 
@@ -113,7 +117,7 @@ export async function queueTrack(
 export function clearScheduledAudio(scheduler: Scheduler) {
     for (const event of scheduler.bufferedTracks) {
         for (const segment of event.segments) {
-            segment.audioBufferSource.stop(0);
+            segment.audioBufferSource.disconnect();
         }
     }
 }

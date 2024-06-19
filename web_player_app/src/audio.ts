@@ -84,7 +84,7 @@ export function loadAudioForTrack(
             }))
         });
         const frameListener = audioLoader.emitter.onFrame(track.track_id, (event) =>
-            handleFrameInContext(audioLoader, event, loadContext));
+            handleFrameInContext(audioLoader, event.frame, loadContext));
         const audioSegments = await loadAudioSegments(audioLoader, track, loadContext);
         const trackDuration = Duration.fromMilliseconds(track.duration_milliseconds);
         audioLoader.emitter.off("error", errorListener);

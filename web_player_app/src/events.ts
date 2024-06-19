@@ -1,69 +1,83 @@
-import { Result } from "./result";
+import { random } from "./math";
 
 type EventMap = Record<string, any>
 
-type EventKey<T extends EventMap> = string & keyof T;
+export type EventKey<T extends EventMap> = string & keyof T;
 type EventHandler<T> = (event: T) => void;
 
+export interface EventListener<T> {
+    id: number,
+    handler: EventHandler<T>
+}
+
 export class Emitter<T extends EventMap> {
-    private singleUse: Set<any>;
-    private handlers: {
-        [K in keyof EventMap]?: Array<(event: EventMap[K]) => void>
+    private singleUse: Set<EventListener<any>>;
+    private listenersByEvent: {
+        [K in keyof EventMap]?: Array<EventListener<EventMap[K]>>
     }
 
     constructor() {
-        this.handlers = {};
+        this.listenersByEvent = {};
         this.singleUse = new Set();
     }
 
-    // Returns number of handlers added
-    on<K extends EventKey<T>>(key: K, handler: EventHandler<T[K]>): number {
-        if (!(key in this.handlers)) {
-            this.handlers[key] = [];
-        }
-
-        this.handlers[key]!.push(handler);
-
-        return 1;
+    private createListener<T>(handler: EventHandler<T>): EventListener<T> {
+        return {
+            id: random(0, Number.MAX_SAFE_INTEGER),
+            handler
+        };
     }
 
-    once<K extends EventKey<T>>(key: K, handler: EventHandler<T[K]>): number {
-        if (!(key in this.handlers)) {
-            this.handlers[key] = [];
+    on<K extends EventKey<T>>(key: K, handler: EventHandler<T[K]>): EventListener<T[K]> {
+        if (!(key in this.listenersByEvent)) {
+            this.listenersByEvent[key] = [];
         }
 
-        this.handlers[key]!.push(handler);
-        this.singleUse.add(handler);
+        let listener = this.createListener(handler);
+        this.listenersByEvent[key]!.push(listener);
 
-        return 1;
+        return listener;
+    }
+
+    once<K extends EventKey<T>>(key: K, handler: EventHandler<T[K]>): EventListener<T[K]> {
+        if (!(key in this.listenersByEvent)) {
+            this.listenersByEvent[key] = [];
+        }
+
+        let listener = this.createListener(handler);
+        this.listenersByEvent[key]!.push(listener);
+        this.singleUse.add(listener);
+
+        return listener;
     }
 
     // Returns number of handlers removed
-    off<K extends EventKey<T>>(key: K, handler: EventHandler<T[K]>): number {
-        if (!(key in this.handlers)) {
-            this.handlers[key] = [];
+    off<K extends EventKey<T>>(key: K, listener: EventListener<T[K]>): number {
+        if (!(key in this.listenersByEvent)) {
+            this.listenersByEvent[key] = [];
         }
 
-        const originalSize = this.handlers[key]!.length;
-        this.handlers[key] = this.handlers[key]!.filter((other) => handler != other);
+        const originalSize = this.listenersByEvent[key]!.length;
+        this.listenersByEvent[key] = this.listenersByEvent[key]!
+            .filter((other) => listener.id != other.id);
 
-        return originalSize - this.handlers[key]!.length;
+        return originalSize - this.listenersByEvent[key]!.length;
     }
 
     // Returns number of event emitted
     emit<K extends EventKey<T>>(key: K, event: T[K]): number {
-        if (!(key in this.handlers)) {
+        if (!(key in this.listenersByEvent)) {
             return 0;
         }
 
         let eventsEmitted = 0;
 
-        for (const handler of this.handlers[key]!) {
-            handler(event);
+        for (const listener of this.listenersByEvent[key]!) {
+            listener.handler(event);
             eventsEmitted++;
 
-            if (this.singleUse.has(handler)) {
-                this.off(key, handler);
+            if (this.singleUse.has(listener)) {
+                this.off(key, listener);
             }
         }
 

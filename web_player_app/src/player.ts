@@ -242,6 +242,7 @@ async function playTrack(player: Player, track: Track): Promise<Result<PlaybackE
             return;
         }
 
+        play(player.audioOutput);
         player.currentTrackPlayback.unwrap().intervalId = Optional.of(
             startAudioPlaybackMonitoring(player));
     }));

@@ -5,7 +5,7 @@ import { Result } from "./result";
 import { Duration, Time, Timerange } from "./time";
 import { Status, StatusCode } from "grpc-web";
 import { GrpcWebFetchTransport } from "@protobuf-ts/grpcweb-transport";
-import { Emitter } from "./events";
+import { Emitter, EventKey, EventListener } from "./events";
 import { AudioOutput } from "./player";
 
 export interface Audio {
@@ -59,12 +59,14 @@ interface LoadContext {
     abortSignal: AbortSignal
 }
 
+type AudioLoaderEmitterEventMap = {
+    cancel: CancelEvent,
+    frame: FrameEvent,
+    error: ErrorEvent,
+}
+
 class AudioLoaderEmitter {
-    emitter: Emitter<{
-        cancel: CancelEvent,
-        frame: FrameEvent,
-        error: ErrorEvent,
-    }>;
+    emitter: Emitter<AudioLoaderEmitterEventMap>;
 
     constructor() {
         this.emitter = new Emitter();
@@ -74,8 +76,8 @@ class AudioLoaderEmitter {
         trackId: string,
         abortController: AbortController,
         handler: (event: CancelEvent) => void
-    ) {
-        this.emitter.on("cancel", (event) => {
+    ): EventListener<CancelEvent> {
+        return this.emitter.on("cancel", (event) => {
             if (trackId !== event.canceledTrack.track_id) {
                 return;
             }
@@ -85,8 +87,11 @@ class AudioLoaderEmitter {
         });
     }
 
-    onFrame(trackId: string, handler: (event: FrameEvent) => void) {
-        this.emitter.on("frame", (event) => {
+    onFrame(
+        trackId: string,
+        handler: (event: FrameEvent) => void
+    ): EventListener<FrameEvent> {
+        return this.emitter.on("frame", (event) => {
             if (trackId !== event.track.track_id) {
                 return;
             }
@@ -99,8 +104,8 @@ class AudioLoaderEmitter {
         trackId: string,
         abortController: AbortController,
         handler: (event: ErrorEvent) => void
-    ) {
-        this.emitter.on("error", (event) => {
+    ): EventListener<ErrorEvent> {
+        return this.emitter.on("error", (event) => {
             if (event.trackId !== trackId) {
                 return;
             }
@@ -108,6 +113,13 @@ class AudioLoaderEmitter {
             abortController.abort();
             handler(event);
         });
+    }
+
+    off<K extends EventKey<AudioLoaderEmitterEventMap>>(
+        key: K,
+        listener: EventListener<AudioLoaderEmitterEventMap[K]>
+    ): number {
+        return this.emitter.off(key, listener);
     }
 
     emitError(trackId: string, error: Status) {
@@ -146,8 +158,6 @@ export function cancelAudioLoad(audioLoader: AudioLoader, track: Track) {
     audioLoader.emitter.emitCancel(track);
 }
 
-// TODO: It could make more sense to return the load context and have it hold a promise of
-// audio segments
 export function loadAudioForTrack(
     audioLoader: AudioLoader,
     track: Track,
@@ -156,34 +166,38 @@ export function loadAudioForTrack(
     return new Promise(async (resolve) => {
         const abortController = new AbortController();
         const loadContext = createLoadContext(onSegment, abortController);
-
-        // TODO(MEMORY LEAK): Need to clean up these listeners at somepoint otherwise we will 
-        // overflow memory
-        audioLoader.emitter.onError(track.track_id, abortController, (event) => {
+        const errorListener = audioLoader.emitter.onError(track.track_id, abortController, (event) => {
+            audioLoader.emitter.off("error", errorListener);
+            audioLoader.emitter.off("cancel", cancelListener);
+            audioLoader.emitter.off("frame", frameListener);
             return resolve(Result.error(event.error));
         });
-        audioLoader.emitter.onCancel(track.track_id, abortController, () => {
+        const cancelListener = audioLoader.emitter.onCancel(track.track_id, abortController, () => {
+            audioLoader.emitter.off("error", errorListener);
+            audioLoader.emitter.off("cancel", cancelListener);
+            audioLoader.emitter.off("frame", frameListener);
             return resolve(Result.error({
                 code: StatusCode.CANCELLED,
                 details: "Audio load canceled"
             }))
         });
-        audioLoader.emitter.onFrame(track.track_id, (event) =>
+        const frameListener = audioLoader.emitter.onFrame(track.track_id, (event) =>
             handleFrameInContext(audioLoader, event, loadContext));
-
-        const decodingTasks = await requestAudioFrames(audioLoader, track, abortController.signal);
-
-        if (decodingTasks.isError()) {
-            return resolve(Result.error(decodingTasks.error()));
-        }
-
-        // this could return audio segments?
-        await Promise.all(decodingTasks.value());
+        const audioSegments = await loadAudioSegments(audioLoader, track, loadContext);
         const trackDuration = Duration.fromMilliseconds(track.duration_milliseconds);
+        audioLoader.emitter.off("error", errorListener);
+        audioLoader.emitter.off("cancel", cancelListener);
+        audioLoader.emitter.off("frame", frameListener);
+
+        if (audioSegments.isError()) {
+            console.log(audioLoader.emitter);
+            return resolve(Result.error(audioSegments.error()));
+        }
+        console.log(audioLoader.emitter);
 
         return resolve(Result.ok({
             trackId: track.track_id,
-            segments: loadContext.audioSegments,
+            segments: audioSegments.value(),
             duration: trackDuration,
             scheduledTimeRange: {
                 start: Time.fromUnixSeconds(0),
@@ -234,13 +248,13 @@ function handleFrameInContext(
     }
 }
 
-function requestAudioFrames(
+function loadAudioSegments(
     audioLoader: AudioLoader,
     track: Track,
-    abortSignal: AbortSignal
-): Promise<Result<Promise<Result<AudioFrame, Status>>[], Status>> {
+    loadContext: LoadContext
+): Promise<Result<AudioSegment[], Status>> {
     return new Promise(async (resolve) => {
-        abortSignal.addEventListener("abort", () => {
+        loadContext.abortSignal.addEventListener("abort", () => {
             return resolve(Result.error({
                 code: StatusCode.CANCELLED,
                 details: "Audio loading canceled"
@@ -251,7 +265,7 @@ function requestAudioFrames(
         });
         const hubClient = new HubClient(new GrpcWebFetchTransport({
             baseUrl: `http://${track.hub_id}`,
-            abort: abortSignal
+            abort: loadContext.abortSignal
         }));
         const stream = hubClient.streamAudio(request, {});
         let decodingTasks: Promise<Result<AudioFrame, Status>>[] = [];
@@ -262,13 +276,15 @@ function requestAudioFrames(
             decodingTasks.push(createDecodingTask(
                 audioLoader,
                 worker,
-                abortSignal,
+                loadContext.abortSignal,
                 track,
                 response
             ));
         };
 
-        return resolve(Result.ok(decodingTasks));
+        await Promise.all(decodingTasks);
+
+        return resolve(Result.ok(loadContext.audioSegments));
     });
 }
 

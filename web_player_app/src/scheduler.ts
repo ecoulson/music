@@ -3,7 +3,7 @@ import { AudioLoader, AudioSegment, cancelAudioLoad, loadAudioForTrack, playAudi
 import { Optional } from "./optional";
 import { AudioOutput } from "./player";
 import { Result } from "./result";
-import { Duration, Time } from "./time";
+import { Duration } from "./time";
 import { Status } from "grpc-web";
 
 export interface Scheduler {
@@ -15,6 +15,7 @@ export interface Scheduler {
 }
 
 export interface PlaybackEvent {
+    sequenceId: number,
     track: Track,
     offset: Duration
     segments: AudioSegment[],
@@ -24,14 +25,16 @@ export function createScheduler(audioLoader: AudioLoader, bufferTrackSize: numbe
     return {
         audioLoader,
         bufferTrackSize,
+        // treat as ring buffer
         bufferedTracks: [],
         schedule: [],
         currentTrackIndex: 0
     }
 }
 
-function createPlaybackEvent(track: Track, offset: Duration): PlaybackEvent {
+function createPlaybackEvent(sequenceId: number, track: Track, offset: Duration): PlaybackEvent {
     return {
+        sequenceId,
         track,
         offset,
         segments: []
@@ -50,7 +53,7 @@ export async function swapTrack(
     const trackOffset = Duration.fromMilliseconds(
         scheduler.bufferedTracks.slice(0, scheduler.currentTrackIndex).reduce<number>(
             (offset, event) => offset + event.track.duration_milliseconds, 0));
-    const playbackEvent = createPlaybackEvent(track, trackOffset);
+    const playbackEvent = createPlaybackEvent(scheduler.currentTrackIndex, track, trackOffset);
 
     if (scheduler.schedule.length == 0) {
         scheduler.schedule.push(track);
@@ -89,7 +92,7 @@ export async function queueTrack(
 ): Promise<Result<Optional<PlaybackEvent>, Status>> {
     const trackOffset = Duration.fromMilliseconds(scheduler.bufferedTracks.reduce<number>(
         (offset, event) => offset + event.track.duration_milliseconds, 0));
-    const playbackEvent = createPlaybackEvent(track, trackOffset);
+    const playbackEvent = createPlaybackEvent(scheduler.currentTrackIndex, track, trackOffset);
     scheduler.schedule.push(track);
 
     if (scheduler.bufferedTracks.length == scheduler.bufferTrackSize) {

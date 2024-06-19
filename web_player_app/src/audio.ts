@@ -5,8 +5,8 @@ import { Result } from "./result";
 import { Duration, Time, Timerange } from "./time";
 import { Status, StatusCode } from "grpc-web";
 import { GrpcWebFetchTransport } from "@protobuf-ts/grpcweb-transport";
-import { Emitter, EventKey, EventListener } from "./events";
 import { AudioOutput } from "./player";
+import { AudioLoaderEmitter } from "./audio_emitter";
 
 export interface Audio {
     trackId: string;
@@ -23,11 +23,6 @@ export interface AudioSegment {
     duration: Duration;
 }
 
-interface AudioFrame {
-    buffer: AudioBuffer;
-    frameId: number;
-}
-
 export interface AudioLoader {
     audio: PlayerAudio;
     emitter: AudioLoaderEmitter;
@@ -38,18 +33,9 @@ interface PlayerAudio {
     gainNode: GainNode;
 }
 
-interface CancelEvent {
-    canceledTrack: Track
-}
-
-interface FrameEvent {
-    frame: AudioFrame,
-    track: Track
-}
-
-interface ErrorEvent {
-    trackId: string,
-    error: Status
+export interface AudioFrame {
+    buffer: AudioBuffer;
+    frameId: number;
 }
 
 interface LoadContext {
@@ -57,90 +43,6 @@ interface LoadContext {
     audioSegments: AudioSegment[],
     onSegment: (segment: AudioSegment) => void,
     abortSignal: AbortSignal
-}
-
-type AudioLoaderEmitterEventMap = {
-    cancel: CancelEvent,
-    frame: FrameEvent,
-    error: ErrorEvent,
-}
-
-class AudioLoaderEmitter {
-    emitter: Emitter<AudioLoaderEmitterEventMap>;
-
-    constructor() {
-        this.emitter = new Emitter();
-    }
-
-    onCancel(
-        trackId: string,
-        abortController: AbortController,
-        handler: (event: CancelEvent) => void
-    ): EventListener<CancelEvent> {
-        return this.emitter.on("cancel", (event) => {
-            if (trackId !== event.canceledTrack.track_id) {
-                return;
-            }
-
-            abortController.abort();
-            handler(event);
-        });
-    }
-
-    onFrame(
-        trackId: string,
-        handler: (event: FrameEvent) => void
-    ): EventListener<FrameEvent> {
-        return this.emitter.on("frame", (event) => {
-            if (trackId !== event.track.track_id) {
-                return;
-            }
-
-            handler(event);
-        });
-    }
-
-    onError(
-        trackId: string,
-        abortController: AbortController,
-        handler: (event: ErrorEvent) => void
-    ): EventListener<ErrorEvent> {
-        return this.emitter.on("error", (event) => {
-            if (event.trackId !== trackId) {
-                return;
-            }
-
-            abortController.abort();
-            handler(event);
-        });
-    }
-
-    off<K extends EventKey<AudioLoaderEmitterEventMap>>(
-        key: K,
-        listener: EventListener<AudioLoaderEmitterEventMap[K]>
-    ): number {
-        return this.emitter.off(key, listener);
-    }
-
-    emitError(trackId: string, error: Status) {
-        this.emitter.emit("error", {
-            trackId,
-            error
-        });
-    }
-
-    emitFrame(track: Track, frame: AudioFrame) {
-        this.emitter.emit("frame", {
-            track,
-            frame
-        });
-    }
-
-    emitCancel(track: Track) {
-        this.emitter.emit("cancel", {
-            canceledTrack: track
-        });
-    }
 }
 
 export function playAudioSegment(audio: AudioSegment, offset: Duration) {
@@ -190,10 +92,8 @@ export function loadAudioForTrack(
         audioLoader.emitter.off("frame", frameListener);
 
         if (audioSegments.isError()) {
-            console.log(audioLoader.emitter);
             return resolve(Result.error(audioSegments.error()));
         }
-        console.log(audioLoader.emitter);
 
         return resolve(Result.ok({
             trackId: track.track_id,
@@ -221,21 +121,21 @@ function createLoadContext(
 
 function handleFrameInContext(
     audioLoader: AudioLoader,
-    event: FrameEvent,
+    frame: AudioFrame,
     loadContext: LoadContext
 ) {
     if (loadContext.abortSignal.aborted) {
         return;
     }
 
-    if (event.frame.frameId == loadContext.audioSegments.length) {
-        const segment = createAudioSegment(audioLoader.audio, event.frame, loadContext);
+    if (frame.frameId == loadContext.audioSegments.length) {
+        const segment = createAudioSegment(audioLoader.audio, frame, loadContext);
         loadContext.onSegment(segment);
         loadContext.audioSegments.push(segment);
         return;
     }
 
-    loadContext.idleFrames = insertIdleFrame(event.frame, loadContext.idleFrames);
+    loadContext.idleFrames = insertIdleFrame(frame, loadContext.idleFrames);
 
     while (loadContext.idleFrames.length > 0 && loadContext.idleFrames[0].frameId == loadContext.audioSegments.length) {
         const segment = createAudioSegment(

@@ -1,17 +1,17 @@
 import { Track } from "../generated/hub";
-import { AudioLoader, AudioSegment, cancelAudioLoad, loadAudioForTrack, playAudioSegment } from "./audio";
+import { AudioLoader, AudioSegment, cancelAudioLoad, cancelAudioSegment, loadAudioForTrack, playAudioSegment } from "./audio";
 import { Optional } from "./optional";
 import { AudioOutput } from "./player";
 import { Result } from "./result";
-import { Duration } from "./time";
+import { Tape, capacity, createTape, isEmpty, shiftRight, size, sliceRight, write } from "./tape";
+import { Duration, Time } from "./time";
 import { Status } from "grpc-web";
 
 export interface Scheduler {
     audioLoader: AudioLoader;
-    bufferedTracks: PlaybackEvent[];
+    trackTape: Tape<PlaybackEvent>;
     schedule: Track[];
     currentTrackIndex: number;
-    bufferTrackSize: number;
 }
 
 export interface PlaybackEvent {
@@ -21,12 +21,10 @@ export interface PlaybackEvent {
     segments: AudioSegment[],
 }
 
-export function createScheduler(audioLoader: AudioLoader, bufferTrackSize: number): Scheduler {
+export function createScheduler(audioLoader: AudioLoader, trackBufferSize: number): Scheduler {
     return {
         audioLoader,
-        bufferTrackSize,
-        // treat as ring buffer
-        bufferedTracks: [],
+        trackTape: createTape(trackBufferSize),
         schedule: [],
         currentTrackIndex: 0
     }
@@ -50,24 +48,21 @@ export async function swapTrack(
     track: Track,
     onSegment: Optional<() => void>
 ): Promise<Result<Optional<PlaybackEvent>, Status>> {
-    const trackOffset = Duration.fromMilliseconds(
-        scheduler.bufferedTracks.slice(0, scheduler.currentTrackIndex).reduce<number>(
-            (offset, event) => offset + event.track.duration_milliseconds, 0));
+    const trackOffset = Duration.fromMilliseconds(0);
     const playbackEvent = createPlaybackEvent(scheduler.currentTrackIndex, track, trackOffset);
+
+    write(scheduler.trackTape, playbackEvent);
 
     if (scheduler.schedule.length == 0) {
         scheduler.schedule.push(track);
-        scheduler.bufferedTracks.push(playbackEvent);
     } else {
         clearScheduledAudio(scheduler);
         scheduler.schedule[scheduler.currentTrackIndex] = track;
-        scheduler.bufferedTracks[scheduler.currentTrackIndex] = playbackEvent;
     }
 
     const audio = await loadAudioForTrack(scheduler.audioLoader, track, (segment) => {
         playbackEvent.segments.push(segment);
-        const contextOffset = Duration.fromSeconds(playbackEvent.segments[0].contextTime.seconds());
-        playAudioSegment(segment, trackOffset.add(contextOffset));
+        playAudioSegment(segment, Duration.fromSeconds(0));
 
         if (onSegment.some()) {
             onSegment.unwrap()();
@@ -90,14 +85,20 @@ export async function queueTrack(
     track: Track,
     onSegment: Optional<() => void>
 ): Promise<Result<Optional<PlaybackEvent>, Status>> {
-    const trackOffset = Duration.fromMilliseconds(scheduler.bufferedTracks.reduce<number>(
-        (offset, event) => offset + event.track.duration_milliseconds, 0));
+    const trackOffset = Duration.fromMilliseconds(scheduler.schedule.reduce<number>(
+        (offset, track) => offset + track.duration_milliseconds, 0));
     const playbackEvent = createPlaybackEvent(scheduler.currentTrackIndex, track, trackOffset);
     scheduler.schedule.push(track);
 
-    if (scheduler.bufferedTracks.length == scheduler.bufferTrackSize) {
+    if (size(scheduler.trackTape) == capacity(scheduler.trackTape)) {
         console.log("lazy load this track");
         return Result.ok(Optional.empty());
+    }
+
+    if (isEmpty(scheduler.trackTape)) {
+        write(scheduler.trackTape, playbackEvent);
+    } else {
+        shiftRight(scheduler.trackTape, playbackEvent);
     }
 
     const audio = await loadAudioForTrack(scheduler.audioLoader, track, (segment) => {
@@ -118,9 +119,9 @@ export async function queueTrack(
 
 
 export function clearScheduledAudio(scheduler: Scheduler) {
-    for (const event of scheduler.bufferedTracks) {
+    for (const event of sliceRight(scheduler.trackTape)) {
         for (const segment of event.segments) {
-            segment.audioBufferSource.disconnect();
+            cancelAudioSegment(segment);
         }
     }
 }
@@ -128,10 +129,71 @@ export function clearScheduledAudio(scheduler: Scheduler) {
 export function skipTrack(scheduler: Scheduler, audio: AudioOutput) {
 }
 
-export function adjustSchedule(scheduler: Scheduler, offset: Duration) {
-    if (scheduler.bufferedTracks.length == 0) {
+export function adjustSchedule(
+    scheduler: Scheduler,
+    trackOffset: Duration,
+    audioOutput: AudioOutput
+) {
+    if (isEmpty(scheduler.trackTape)) {
         return;
     }
 
-    clearScheduledAudio(scheduler);
+    let offset = Duration.fromSeconds(audioOutput.context.currentTime);
+    const activeTrackPlaybacks = sliceRight(scheduler.trackTape);
+    const currentTrackPlayback = activeTrackPlaybacks[0];
+    const startTime = currentTrackPlayback.segments[0].scheduledTimeRange.start;
+    const trackContextOffset = startTime.add(Time.fromUnixSeconds(trackOffset.seconds()));
+    let segmentIndex = 0;
+    let skippedDuration = Duration.fromSeconds(0);
+
+    while (currentTrackPlayback.segments[segmentIndex].scheduledTimeRange.start.seconds() <= trackContextOffset.seconds() && trackContextOffset.seconds() < currentTrackPlayback.segments[segmentIndex].scheduledTimeRange.end.seconds()) {
+        segmentIndex++;
+        skippedDuration.add(currentTrackPlayback.segments[segmentIndex].duration);
+    }
+
+    if (currentTrackPlayback.segments.length <= segmentIndex) {
+        console.log("Should pause playback in unloaded frame");
+        return;
+    }
+
+    let end = offset.add(trackOffset.subtract(skippedDuration));
+    currentTrackPlayback.segments[segmentIndex].scheduledTimeRange = {
+        start: Time.fromUnixSeconds(offset.seconds()),
+        end: Time.fromUnixSeconds(end.seconds())
+    }
+    cancelAudioSegment(currentTrackPlayback.segments[segmentIndex]);
+    playAudioSegment(currentTrackPlayback.segments[segmentIndex], trackOffset);
+    offset = end;
+
+    for (let i = segmentIndex + 1; i < currentTrackPlayback.segments.length; i++) {
+        let end = offset.add(currentTrackPlayback.segments[i].duration);
+        currentTrackPlayback.segments[i].scheduledTimeRange = {
+            start: Time.fromUnixSeconds(offset.seconds()),
+            end: Time.fromUnixSeconds(end.seconds())
+        }
+        cancelAudioSegment(currentTrackPlayback.segments[i]);
+        playAudioSegment(currentTrackPlayback.segments[i], Duration.fromSeconds(0));
+        offset = end;
+    }
+
+    if (activeTrackPlaybacks.length == 1) {
+        return;
+    }
+
+
+    for (const event of activeTrackPlaybacks.slice(1)) {
+
+        for (const segment of event.segments) {
+            segment.scheduledTimeRange = {
+                start: Time.fromUnixSeconds(offset.seconds()),
+                end: Time.fromUnixSeconds(end.seconds())
+            }
+            offset = end;
+            cancelAudioSegment(segment);
+            playAudioSegment(segment, offset);
+        }
+
+        offset = offset.add(
+            Duration.fromMilliseconds(event.track.duration_milliseconds));
+    }
 }

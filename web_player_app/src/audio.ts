@@ -8,6 +8,7 @@ import { GrpcWebFetchTransport } from "@protobuf-ts/grpcweb-transport";
 import { AudioOutput } from "./player";
 import { AudioLoaderEmitter } from "./audio_emitter";
 
+// TODO: Question why this is being constructed
 export interface Audio {
     trackId: string;
     duration: Duration;
@@ -17,9 +18,8 @@ export interface Audio {
 
 export interface AudioSegment {
     frameId: number;
-    contextTime: Time,
     audioBufferSource: AudioBufferSourceNode;
-    scheduledTime: Time;
+    scheduledTimeRange: Timerange;
     duration: Duration;
 }
 
@@ -39,6 +39,7 @@ export interface AudioFrame {
 }
 
 interface LoadContext {
+    track: Track,
     idleFrames: AudioFrame[],
     audioSegments: AudioSegment[],
     onSegment: (segment: AudioSegment) => void,
@@ -46,7 +47,15 @@ interface LoadContext {
 }
 
 export function playAudioSegment(audio: AudioSegment, offset: Duration) {
-    audio.audioBufferSource.start(offset.seconds() + audio.scheduledTime.seconds());
+    audio.audioBufferSource.start(audio.scheduledTimeRange.start.seconds(), offset.seconds());
+}
+
+export function cancelAudioSegment(audio: AudioSegment) {
+    const newSource = audio.audioBufferSource.context.createBufferSource();
+    audio.audioBufferSource.stop(0);
+    audio.audioBufferSource.disconnect();
+    newSource.buffer = audio.audioBufferSource.buffer;
+    audio.audioBufferSource = newSource;
 }
 
 export function createAudioLoader(audio: PlayerAudio): AudioLoader {
@@ -67,7 +76,7 @@ export function loadAudioForTrack(
 ): Promise<Result<Audio, Status>> {
     return new Promise(async (resolve) => {
         const abortController = new AbortController();
-        const loadContext = createLoadContext(onSegment, abortController);
+        const loadContext = createLoadContext(track, onSegment, abortController);
         const errorListener = audioLoader.emitter.onError(track.track_id, abortController, (event) => {
             audioLoader.emitter.off("error", errorListener);
             audioLoader.emitter.off("cancel", cancelListener);
@@ -108,10 +117,12 @@ export function loadAudioForTrack(
 }
 
 function createLoadContext(
+    track: Track,
     onSegment: (segment: AudioSegment) => void,
     abortController: AbortController
 ): LoadContext {
     return {
+        track,
         onSegment,
         abortSignal: abortController.signal,
         idleFrames: [],
@@ -278,12 +289,11 @@ function createAudioSegment(
     audioFrame: AudioFrame,
     loadContext: LoadContext
 ): AudioSegment {
-    let scheduledTimeSeconds = 0;
+    let scheduledTimeSeconds = audioOutput.context.currentTime;
 
     if (loadContext.audioSegments.length > 0) {
         let previousTrackNode = loadContext.audioSegments[loadContext.audioSegments.length - 1];
-        scheduledTimeSeconds = previousTrackNode.duration.seconds()
-            + previousTrackNode.scheduledTime.seconds();
+        scheduledTimeSeconds = previousTrackNode.scheduledTimeRange.end.seconds();
     }
 
     const audioBufferSource = audioOutput.context.createBufferSource();
@@ -291,11 +301,14 @@ function createAudioSegment(
     audioBufferSource.buffer = audioFrame.buffer;
 
     return {
-        contextTime: Time.fromUnixSeconds(audioOutput.context.currentTime),
         frameId: audioFrame.frameId,
         audioBufferSource,
         duration: Duration.fromSeconds(audioFrame.buffer.duration),
-        scheduledTime: Time.fromUnixSeconds(scheduledTimeSeconds),
+        scheduledTimeRange: {
+            start: Time.fromUnixSeconds(scheduledTimeSeconds),
+            end: Time.fromUnixSeconds(scheduledTimeSeconds).add(
+                Time.fromUnixMilliseconds(loadContext.track.duration_milliseconds))
+        }
     }
 }
 

@@ -61,4 +61,8 @@ export class Duration {
     add(duration: Duration): Duration {
         return new Duration(this.seconds_ + duration.seconds_);
     }
+
+    subtract(duration: Duration): Duration {
+        return new Duration(this.seconds_ - duration.seconds_);
+    }
 }

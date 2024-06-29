@@ -4,7 +4,7 @@ import { HubClient } from "../generated/hub.client";
 import { addHtmxListener, mount, querySelector } from "./dom";
 import { Optional } from "./optional";
 import { Result } from "./result";
-import { PlaybackEvent, Scheduler, cancelLoad, clearScheduledAudio, createScheduler, queueTrack, swapTrack } from "./scheduler";
+import { PlaybackEvent, Scheduler, adjustSchedule, cancelLoad, clearScheduledAudio, createScheduler, queueTrack, swapTrack } from "./scheduler";
 import { Slider, addSliderHandlers, createSlider, mountSlider, repositionSlider } from "./slider";
 import { Duration, Time } from "./time";
 import { PlayerState } from "../generated/player";
@@ -117,7 +117,7 @@ function createPlayer(rootSelector: string): Result<Player, string> {
         playButton: playButton.unwrap(),
         playbackSlider: playbackSlider.unwrap(),
         volumeSlider,
-        scheduler: createScheduler(createAudioLoader(audioOutput), /*buffer_size=*/5),
+        scheduler: createScheduler(createAudioLoader(audioOutput), /*buffer_size=*/7),
         currentTrackPlayback,
     });
 }
@@ -418,5 +418,15 @@ function createTrackPlayback(track: Track, intervalId: Optional<number> = Option
 
 
 function handlePlaybackSlide(player: Player, value: number) {
-    console.log(player, value);
+    if (player.currentTrackPlayback.none()) {
+        console.error("Can't handle seek when no playback is active");
+        return;
+    }
+
+    adjustSchedule(
+        player.scheduler,
+        Duration.fromMilliseconds(
+            value * player.currentTrackPlayback.unwrap().duration.milliseconds()),
+        player.audioOutput
+    );
 }
